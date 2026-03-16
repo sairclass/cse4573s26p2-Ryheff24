@@ -22,10 +22,28 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     Returns:
         img: stitched_image: torch.Tensor of the output image.
     """
-    img = torch.zeros((3, 256, 256)) # assumed 256*256 resolution. Update this as per your logic.
+    img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
+
+    matcher = K.feature.LoFTR(pretrained='indoor')
+    IS = K.contrib.ImageStitcher(matcher, estimator='ransac')
+
+    imlist = list(imgs.values())
+    left = imlist[0] / 255
+    right = imlist[1] / 255
+    # show_image(left)
+    # show_image(right)
     
+    # print(left.max(), left.min(), right.max(), right.min())
+    print(left.shape, right.shape)
+    padding = abs(left.shape[1] - right.shape[1])
+    left = torch.nn.functional.pad(left, (0,0,0,padding))
+    
+    with torch.no_grad():
+        out = IS(left.unsqueeze(0), right.unsqueeze(0))
+
+    show_image(out.squeeze(0))
     return img
 
 # ------------------------------------ Task 2 ------------------------------------ #
