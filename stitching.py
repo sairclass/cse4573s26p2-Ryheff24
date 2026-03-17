@@ -30,11 +30,15 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     imlist = list(imgs.values())
     left = (imlist[0]/255).unsqueeze(0)
     right = (imlist[1]/255).unsqueeze(0)
-    out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
-    print(out_shape)
-    
     padding = abs(left.shape[2] - right.shape[2])
+    pad = (110,)*4
+    # left = torch.nn.functional.pad(left, pad)
+    # right = torch.nn.functional.pad(right, pad)
     left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
+    out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
+    # print(out_shape)
+    
+
     
     inputdict = {
       "image0": K.color.rgb_to_grayscale(left),
@@ -48,16 +52,15 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     points = loftr(inputdict)
     ransac = K.geometry.RANSAC() 
     homo = ransac(points["keypoints0"], points["keypoints1"])
+    # print(homo[0])
+    # print(homo[1])
     
     src_img = K.geometry.warp_perspective(left, homo[0].unsqueeze(0), out_shape)
     dst_img = torch.concatenate([right, torch.zeros_like(left_pad)], -1)
     # dst_img = torch.zeros(out_shape)
-    print(src_img.dtype, dst_img.dtype)
+    # print(src_img.dtype, dst_img.dtype)
     write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
     write_image((dst_img.squeeze(0)  * 255).to(torch.uint8), "dst.png")
-    
-    
-    
     
     
     
