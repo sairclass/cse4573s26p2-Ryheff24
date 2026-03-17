@@ -8,7 +8,7 @@ Notes:
 import torch
 import kornia as K
 from typing import Dict
-from utils import show_image
+from utils import show_image, write_image
 
 '''
 Please do NOT add any imports. The allowed libraries are already imported for you.
@@ -26,24 +26,72 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
 
     #TODO: Add your code here. Do not modify the return and input arguments.
 
-    matcher = K.feature.LoFTR(pretrained='indoor')
-    IS = K.contrib.ImageStitcher(matcher, estimator='ransac')
 
     imlist = list(imgs.values())
-    left = imlist[0] / 255
-    right = imlist[1] / 255
+    left = (imlist[0]/255).unsqueeze(0)
+    right = (imlist[1]/255).unsqueeze(0)
+    out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
+    print(out_shape)
+    
+    padding = abs(left.shape[2] - right.shape[2])
+    left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
+    
+    inputdict = {
+      "image0": K.color.rgb_to_grayscale(left),
+      "image1": K.color.rgb_to_grayscale(right)
+    }
     # show_image(left)
     # show_image(right)
     
-    # print(left.max(), left.min(), right.max(), right.min())
-    print(left.shape, right.shape)
-    padding = abs(left.shape[1] - right.shape[1])
-    left = torch.nn.functional.pad(left, (0,0,0,padding))
+    loftr = K.feature.LoFTR(pretrained='outdoor')
+    IS = K.contrib.ImageStitcher(loftr, estimator='ransac')
+    points = loftr(inputdict)
+    ransac = K.geometry.RANSAC() 
+    homo = ransac(points["keypoints0"], points["keypoints1"])
     
-    with torch.no_grad():
-        out = IS(left.unsqueeze(0), right.unsqueeze(0))
+    src_img = K.geometry.warp_perspective(left, homo[0].unsqueeze(0), out_shape)
+    dst_img = torch.concatenate([right, torch.zeros_like(left_pad)], -1)
+    # dst_img = torch.zeros(out_shape)
+    print(src_img.dtype, dst_img.dtype)
+    write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
+    write_image((dst_img.squeeze(0)  * 255).to(torch.uint8), "dst.png")
+    
+    
+    
+    
+    
+    
+    # if mask_left is None:
+        # mask_left = torch.ones_like(left)
+    # if mask_right is None:
+        # mask_right = torch.ones_like(right)
+    # 'nearest' to ensure no floating points in the mask
+    # src_mask = K.geometry.warp_perspective(mask_right, homo, out_shape, mode='nearest')
+    # dst_mask = torch.concatenate([mask_left, torch.zeros_like(mask_right)], -1)
+    # IS.blend_image(src_img, dst_img, src_mask), (dst_mask + src_mask).bool().to(src_mask.dtype)
+    # src_mask = (src_img.squeeze(0).sum(dim=0) > 0).float()
+    # dst_mask = (dst_img.squeeze(0).sum(dim=0) > 0).float()
+    
 
-    show_image(out.squeeze(0))
+    
+    
+    
+    
+    # print(dst_img & dst_mask)
+    # print(src_img & src_mask)
+    # show_image((src_mask and dst_mask).float())
+    # show_image((src_mask and not dst_mask).float())
+    # show_image((not src_mask and dst_mask).float())
+    
+    
+    # print(src_mask.max(), dst_mask.max())
+    # padding = abs(left.shape[1] - right.shape[1])
+    # left = torch.nn.functional.pad(left, (0,0,0,padding))
+    
+    # with torch.no_grad():
+    #     out = IS(left.unsqueeze(0), right.unsqueeze(0))
+
+    # show_image(out.squeeze(0))
     return img
 
 # ------------------------------------ Task 2 ------------------------------------ #
