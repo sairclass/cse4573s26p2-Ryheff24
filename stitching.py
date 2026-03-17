@@ -33,8 +33,6 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     right = (imlist[1]/255).unsqueeze(0)
     padding = abs(left.shape[2] - right.shape[2])
     pad = (110,)*4
-    # left = torch.nn.functional.pad(left, pad)
-    # right = torch.nn.functional.pad(right, pad)
     left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
     out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
     # print(out_shape)
@@ -51,45 +49,35 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     homo = ransac(points["keypoints0"], points["keypoints1"])
     shp = left.shape
     print(shp)
-    def transform(point, H):
+    def transform(points, H):
         # Equation 2.21 Szeliski Computer Vision: Algorithms and Applications
-        x = point[0]
-        y = point[1]
-        h = H
-        x_prime = (h[0][0]*x + h[0][1]*y + h[0][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
-        y_prime = (h[1][0]*x + h[1][1]*y + h[1][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
-        return (x_prime, y_prime)
-    
-    tl = (0, 0)
-    tr = (0, shp[3])
-    bl = (shp[2], 0)
-    br = (shp[2], shp[3])
-    
-    tl_prim = transform(tl, homo[0])
-    tr_prim = transform(tr, homo[0])
-    bl_prim = transform(bl, homo[0])
-    br_prim = transform(br, homo[0])
-    # inv = torch.linalg.inv(homo[0])
-    # print(tl, tr, bl, br)
-    
-    # print(tl_prim, tr_prim, bl_prim, br_prim)
-    # print(transform(tl_prim, inv), transform(tr_prim, inv), transform(bl_prim, inv), transform(br_prim, inv))
-    minx = min(tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0])
-    maxx = max(tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0])
-    miny = min(tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1])
-    maxy = max(tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1])
-    # print((minx, maxx),(miny, maxy))
-    # print(maxx-minx,maxy-miny)
+        out = []
+        for point in points:
+            x = point[0]
+            y = point[1]
+            h = H
+            x_prime = (h[0][0]*x + h[0][1]*y + h[0][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
+            y_prime = (h[1][0]*x + h[1][1]*y + h[1][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
+            out.append((x_prime, y_prime))
+        return tuple(out)
+
+    tl,tr = (0, 0), (0, shp[3])
+    bl, br = (shp[2], 0), (shp[2], shp[3])
+    points = (tl, tr, bl, br)
+    t = transform(points, homo[0])
+    tl_prim, tr_prim, bl_prim, br_prim = t[0],t[1],t[2],t[3]
+    x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0]
+    y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1]
+    print(x)
+    minx, maxx = min(x),  max(x)
+    miny, maxy = min(y), max(y)
     outs = (int((maxx-minx).ceil()),int((maxy-miny).ceil()))
-    # print("max bounds", outs[0],outs[1])
-    # print("left shapeshp", shp, shp[-2], shp[-1])
 
     horzpadding = (outs[0]-shp[-2])//2
     vertpadding = (outs[1]-shp[-1])//2
-    # print(horzpadding, horzpadding//2, vertpadding, vertpadding//2)
     print(left.shape)
     left = torch.nn.functional.pad(left, (horzpadding, horzpadding, vertpadding, vertpadding)) 
-    show_image(left.squeeze())
+    # show_image(left.squeeze())
     
     print(left.shape)
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
