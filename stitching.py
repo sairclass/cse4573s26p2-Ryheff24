@@ -5,6 +5,7 @@ Notes:
 3. If you want to show an image for debugging, please use show_image() function in util.py. 
 4. Please do NOT save any intermediate files in your final submission.
 '''
+from matplotlib.pyplot import show
 import torch
 import kornia as K
 from typing import Dict
@@ -26,7 +27,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
 
     #TODO: Add your code here. Do not modify the return and input arguments.
 
-
+    torch.manual_seed(1234)
     imlist = list(imgs.values())
     left = (imlist[0]/255).unsqueeze(0)
     right = (imlist[1]/255).unsqueeze(0)
@@ -37,32 +38,74 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
     out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
     # print(out_shape)
-    
 
-    
     inputdict = {
       "image0": K.color.rgb_to_grayscale(left),
       "image1": K.color.rgb_to_grayscale(right)
     }
-    # show_image(left)
-    # show_image(right)
-    
+
     loftr = K.feature.LoFTR(pretrained='outdoor')
     IS = K.contrib.ImageStitcher(loftr, estimator='ransac')
     points = loftr(inputdict)
     ransac = K.geometry.RANSAC() 
     homo = ransac(points["keypoints0"], points["keypoints1"])
-    # print(homo[0])
-    # print(homo[1])
+    shp = left.shape
+    print(shp)
+    def transform(point, H):
+        # Equation 2.21 Szeliski Computer Vision: Algorithms and Applications
+        x = point[0]
+        y = point[1]
+        h = H
+        x_prime = (h[0][0]*x + h[0][1]*y + h[0][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
+        y_prime = (h[1][0]*x + h[1][1]*y + h[1][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
+        return (x_prime, y_prime)
     
-    src_img = K.geometry.warp_perspective(left, homo[0].unsqueeze(0), out_shape)
-    dst_img = torch.concatenate([right, torch.zeros_like(left_pad)], -1)
-    # dst_img = torch.zeros(out_shape)
-    # print(src_img.dtype, dst_img.dtype)
-    write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
-    write_image((dst_img.squeeze(0)  * 255).to(torch.uint8), "dst.png")
+    tl = (0, 0)
+    tr = (0, shp[3])
+    bl = (shp[2], 0)
+    br = (shp[2], shp[3])
     
+    tl_prim = transform(tl, homo[0])
+    tr_prim = transform(tr, homo[0])
+    bl_prim = transform(bl, homo[0])
+    br_prim = transform(br, homo[0])
+    # inv = torch.linalg.inv(homo[0])
+    # print(tl, tr, bl, br)
     
+    # print(tl_prim, tr_prim, bl_prim, br_prim)
+    # print(transform(tl_prim, inv), transform(tr_prim, inv), transform(bl_prim, inv), transform(br_prim, inv))
+    minx = min(tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0])
+    maxx = max(tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0])
+    miny = min(tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1])
+    maxy = max(tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1])
+    # print((minx, maxx),(miny, maxy))
+    # print(maxx-minx,maxy-miny)
+    outs = (int((maxx-minx).ceil()),int((maxy-miny).ceil()))
+    # print("max bounds", outs[0],outs[1])
+    # print("left shapeshp", shp, shp[-2], shp[-1])
+
+    horzpadding = (outs[0]-shp[-2])//2
+    vertpadding = (outs[1]-shp[-1])//2
+    # print(horzpadding, horzpadding//2, vertpadding, vertpadding//2)
+    print(left.shape)
+    left = torch.nn.functional.pad(left, (horzpadding, horzpadding, vertpadding, vertpadding)) 
+    show_image(left.squeeze())
+    
+    print(left.shape)
+    # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
+    # then use (padding_left,padding_right, padding_top,padding_bottom)
+    
+    # good stuff
+    src_img = K.geometry.warp_perspective(left, homo[0].unsqueeze(0), outs)
+    show_image(src_img.squeeze())
+    
+    # dst_img = torch.concatenate([right, torch.zeros_like(left_pad)], -1)
+    # # dst_img = torch.zeros(out_shape)
+    # # print(src_img.dtype, dst_img.dtype)
+    # write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
+    # write_image((dst_img.squeeze(0)  * 255).to(torch.uint8), "dst.png")
+    
+    # bad stuff
     
     # if mask_left is None:
         # mask_left = torch.ones_like(left)
