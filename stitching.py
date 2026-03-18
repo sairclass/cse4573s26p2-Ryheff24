@@ -31,10 +31,10 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     imlist = list(imgs.values())
     left = (imlist[0]/255).unsqueeze(0)
     right = (imlist[1]/255).unsqueeze(0)
-    padding = abs(left.shape[2] - right.shape[2])
-    pad = (110,)*4
-    left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
-    out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
+    # padding = abs(left.shape[2] - right.shape[2])
+    # pad = (110,)*4
+    # left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
+    # out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
     # print(out_shape)
 
     inputdict = {
@@ -48,7 +48,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     ransac = K.geometry.RANSAC() 
     homo = ransac(points["keypoints0"], points["keypoints1"])
     shp = left.shape
-    print(shp)
+    # print(shp)
     def transform(points, H):
         # Equation 2.21 Szeliski Computer Vision: Algorithms and Applications
         out = []
@@ -58,74 +58,47 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
             h = H
             x_prime = (h[0][0]*x + h[0][1]*y + h[0][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
             y_prime = (h[1][0]*x + h[1][1]*y + h[1][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
-            out.append((x_prime, y_prime))
+            out.append((int(x_prime.round()), int(y_prime.round())))
         return tuple(out)
-
-    tl,tr = (0, 0), (0, shp[3])
-    bl, br = (shp[2], 0), (shp[2], shp[3])
+    # print(shp)
+    tl,tr = (0, 0), (shp[3],0)
+    bl, br = (0,shp[2]), (shp[3], shp[2])
     points = (tl, tr, bl, br)
     t = transform(points, homo[0])
     tl_prim, tr_prim, bl_prim, br_prim = t[0],t[1],t[2],t[3]
-    x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0]
-    y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1]
-    print(x)
-    minx, maxx = min(x),  max(x)
-    miny, maxy = min(y), max(y)
-    outs = (int((maxx-minx).ceil()),int((maxy-miny).ceil()))
-
-    horzpadding = (outs[0]-shp[-2])//2
-    vertpadding = (outs[1]-shp[-1])//2
-    print(left.shape)
-    left = torch.nn.functional.pad(left, (horzpadding, horzpadding, vertpadding, vertpadding)) 
-    # show_image(left.squeeze())
     
-    print(left.shape)
+    x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], right.shape[3], 0
+    y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], right.shape[2], 0
+    minx, maxx = int(min(x)), int(max(x))
+    miny, maxy = int(min(y)), int(max(y))
+            
+        
+    width = maxx-minx
+    height = maxy-miny
+    outs = (height, width)
+    
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
     # then use (padding_left,padding_right, padding_top,padding_bottom)
+    # left = torch.nn.functional.pad(left, (horzpadding, horzpadding, vertpadding, vertpadding))     
+    # homo needs transform
+    T = torch.tensor([[1, 0, -minx],[0, 1 ,-miny],[0, 0, 1]], dtype=torch.float32)
+    # H = T @ homo[0].unsqueeze(0)
+    H = (T @ homo[0]).unsqueeze(0)
+    # print(homo[0].shape, H.shape, T.shape)
+    # print("T:",T)
+    # print("homo:", homo[0])
+    # print("H:", H)
     
     # good stuff
-    src_img = K.geometry.warp_perspective(left, homo[0].unsqueeze(0), outs)
-    show_image(src_img.squeeze())
-    
+    src_img = K.geometry.warp_perspective(left, H, outs)
+    # show_image(src_img.squeeze())
+    padding = (height-right.shape[2])//2
+    right = torch.nn.functional.pad(right, (0,0, padding, padding))     
+
     # dst_img = torch.concatenate([right, torch.zeros_like(left_pad)], -1)
-    # # dst_img = torch.zeros(out_shape)
-    # # print(src_img.dtype, dst_img.dtype)
-    # write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
-    # write_image((dst_img.squeeze(0)  * 255).to(torch.uint8), "dst.png")
+    write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
+    write_image((right.squeeze(0) * 255).to(torch.uint8), "dst.png")
     
-    # bad stuff
-    
-    # if mask_left is None:
-        # mask_left = torch.ones_like(left)
-    # if mask_right is None:
-        # mask_right = torch.ones_like(right)
-    # 'nearest' to ensure no floating points in the mask
-    # src_mask = K.geometry.warp_perspective(mask_right, homo, out_shape, mode='nearest')
-    # dst_mask = torch.concatenate([mask_left, torch.zeros_like(mask_right)], -1)
-    # IS.blend_image(src_img, dst_img, src_mask), (dst_mask + src_mask).bool().to(src_mask.dtype)
-    # src_mask = (src_img.squeeze(0).sum(dim=0) > 0).float()
-    # dst_mask = (dst_img.squeeze(0).sum(dim=0) > 0).float()
-    
-
-    
-    
-    
-    
-    # print(dst_img & dst_mask)
-    # print(src_img & src_mask)
-    # show_image((src_mask and dst_mask).float())
-    # show_image((src_mask and not dst_mask).float())
-    # show_image((not src_mask and dst_mask).float())
-    
-    
-    # print(src_mask.max(), dst_mask.max())
-    # padding = abs(left.shape[1] - right.shape[1])
-    # left = torch.nn.functional.pad(left, (0,0,0,padding))
-    
-    # with torch.no_grad():
-    #     out = IS(left.unsqueeze(0), right.unsqueeze(0))
-
-    # show_image(out.squeeze(0))
     return img
 
 # ------------------------------------ Task 2 ------------------------------------ #
