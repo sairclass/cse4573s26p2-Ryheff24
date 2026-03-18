@@ -77,9 +77,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     height = maxy-miny
     outs = (height, width)
     
-    # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
-    # then use (padding_left,padding_right, padding_top,padding_bottom)
-    # left = torch.nn.functional.pad(left, (horzpadding, horzpadding, vertpadding, vertpadding))     
+  
     # homo needs transform
     T = torch.tensor([[1, 0, -minx],[0, 1 ,-miny],[0, 0, 1]], dtype=torch.float32)
     # H = T @ homo[0].unsqueeze(0)
@@ -93,7 +91,15 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     src_img = K.geometry.warp_perspective(left, H, outs)
     # show_image(src_img.squeeze())
     padding = (height-right.shape[2])//2
-    right = torch.nn.functional.pad(right, (0,0, padding, padding))     
+    # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
+    # then use (padding_left,padding_right, padding_top,padding_bottom)
+    #(at least minx,the width + minx, miny, the height + miny)
+    print(minx,width+minx, miny, height+miny)
+    
+    minx = abs(minx)
+    miny = abs(miny)
+    print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nright.shape: {right.shape}\nsrc_img.shape: {src_img.shape}\nright.shape[2]-height+miny: {right.shape[2]-height+miny} ")
+    right = torch.nn.functional.pad(right, (minx,right.shape[3]-width+minx, miny, height-miny-right.shape[2]))     
 
     # dst_img = torch.concatenate([right, torch.zeros_like(left_pad)], -1)
     write_image((src_img.squeeze(0) * 255).to(torch.uint8), "src.png")
