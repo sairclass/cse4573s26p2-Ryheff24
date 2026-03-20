@@ -5,8 +5,7 @@ Notes:
 3. If you want to show an image for debugging, please use show_image() function in util.py. 
 4. Please do NOT save any intermediate files in your final submission.
 '''
-from matplotlib import axes
-from numpy import var
+
 import torch
 import kornia as K
 from typing import Dict
@@ -52,10 +51,9 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         shp = right.shape
     
     loftr = K.feature.LoFTR(pretrained='outdoor')
-    IS = K.contrib.ImageStitcher(loftr, estimator='ransac')
     
     points = loftr(inputdict)
-    ransac = K.geometry.RANSAC() 
+    ransac = K.geometry.RANSAC(max_iter=20, confidence=0.999, max_lo_iters=20) 
     homo = ransac(points["keypoints0"], points["keypoints1"])
     
     
@@ -104,13 +102,17 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     # print("H:", H)
     
     # good stuff
-    if variant== 0:
-        src_img = K.geometry.warp_perspective(left, H, outs)
-    else:
-        src_img = K.geometry.warp_perspective(right, H, outs)
+    m = "bilinear" # bilinear bicubic
+    p = "zeros" # "zeros" "border" "reflection" "fill"
+    align_corners = True
     
-    # show_image(src_img.squeeze())
-    # padding = (height-right.shape[2])//2
+    if variant== 0:
+        src_img = K.geometry.warp_perspective(left, H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
+    else:
+        src_img = K.geometry.warp_perspective(right, H, outs, padding_mode=p, align_corners=align_corners, mode=m)
+    
+    # show_image(src_img.squeeze(0))
+    
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
     # then use (padding_left,padding_right, padding_top,padding_bottom)
     # (at least minx,the width + minx, miny, the height + miny)
@@ -130,6 +132,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     
     src_mask = torch.any(src_img > 0, dim=0, keepdim=True)
     dst_mask = torch.any(dst_img > 0, dim=0, keepdim=True)
+    
     # print(src_mask.shape, src_mask.dtype)
     # print(dst_mask.shape, dst_mask.dtype)
     # src_mask = src_mask.repeat(3,1,1)
@@ -141,36 +144,67 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         return (tens * 255).to(torch.uint8)
     def i8(tens):
         return tens.to(torch.uint8)
-    
+    # show_image(dst_img)
     if variant == 0:
         combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
+        # combined_mask = torch.where(src_img.bool(), src_img, dst_img)
     else:
-        combined_mask = torch.where(src_img.bool(), src_img, dst_img)
+        combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
+        
             
     
     both = dst_mask & src_mask
     
-    # dst_img = dst_img
-    # src_img = src_img
     both_dst_img = dst_img * both.float()
     both_src_img = src_img * both.float()
     dif = abs(both_src_img - both_dst_img)
-    sigma = 4
-    filter_size = 6 * sigma + 1
-    dif = K.filters.gaussian_blur2d(dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
-    # print(dif)
-    dif = torch.threshold(dif, 0.3, 0)
-    dif = dif.sum(axis=0, keepdim=True)
     
+    sigma = 8
+    filter_size = 6 * sigma + 1
+    erosion_kernel = 8
+    dilation_kernel = 75
+    # dif = K.filters.gaussian_blur2d(dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
+    # dif = torch.threshold(dif, 0.3, 0)
+    # dif = dif.sum(axis=0, keepdim=True)
     # er_kern = 10
-    ekern = torch.ones(8, 8)
-    dif = K.morphology.erosion(dif.unsqueeze(0), ekern).squeeze(0)
-    dkern = torch.ones(75, 75)
-    dif = K.morphology.dilation(dif.unsqueeze(0), dkern).squeeze(0)
-    dif = torch.any(dif > 0, dim=0, keepdim=True)
+    # dif = K.morphology.erosion(dif.unsqueeze(0), ekern).squeeze(0)
+    # dif = K.morphology.dilation(dif.unsqueeze(0), dkern).squeeze(0)
+    # dif = torch.any(dif > 0, dim=0, keepdim=True).to(torch.float32)
+    
+    dst_dif = both_dst_img - both_src_img 
+    src_dif = both_src_img - both_dst_img
+    # print(dst_dif.shape, src_dif.shape)
+    
+    dst_dif = K.filters.gaussian_blur2d(dst_dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
+    src_dif = K.filters.gaussian_blur2d(src_dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
+
+    dst_dif = dst_dif.sum(axis=0, keepdim=True)
+    src_dif = src_dif.sum(axis=0, keepdim=True)
+    
+    dst_dif = torch.threshold(dst_dif, 0.35, 0)
+    src_dif = torch.threshold(src_dif, 0.35, 0)
+    
+    ekern = torch.ones(erosion_kernel, erosion_kernel)
+    dkern = torch.ones(dilation_kernel, dilation_kernel)
+    
+    dst_dif = K.morphology.erosion(dst_dif.unsqueeze(0), ekern).squeeze(0)
+    src_dif = K.morphology.dilation(src_dif.unsqueeze(0), dkern).squeeze(0)
+
+    dst_dif = torch.any(dst_dif > 0, dim=0, keepdim=True).to(torch.uint8)
+    src_dif = torch.any(src_dif > 0, dim=0, keepdim=True).to(torch.uint8)
+
+    dst_dif = both_dst_img * (dst_dif + src_dif)
+    src_dif = both_src_img * (dst_dif + src_dif)
+    
+    write_image(ready(dst_dif),"1.png")
+    write_image(ready(src_dif),"2.png")
+    # show_image(ready(both_dst_img * dif))
+    # dif = K.contrib.connected_components(dif, 300)
+    # print("CCs:", dif.shape)
+
     # ckern = torch.ones(40, 40)
     # dif = K.morphology.closing(dif.unsqueeze(0), ckern).squeeze(0)
-    dif = dst_img * dif
+    # dif = dst_img * dif
 
     print(f"""
 Both: {both.shape},
