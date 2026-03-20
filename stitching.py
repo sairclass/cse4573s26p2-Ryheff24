@@ -6,6 +6,7 @@ Notes:
 4. Please do NOT save any intermediate files in your final submission.
 '''
 
+from matplotlib.pyplot import show
 import torch
 import kornia as K
 from typing import Dict
@@ -26,38 +27,45 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
-    variant = 0
+    # 0 t1_1 is src, t1_2 is dst, 
+    # 1 t1_2 is src, t1_1 is dst
+    variant = 1
+    
     torch.manual_seed(1234)
     imlist = list(imgs.values())
-    left = (imlist[0]/255).unsqueeze(0)
-    right = (imlist[1]/255).unsqueeze(0)
-    
-    # padding = abs(left.shape[2] - right.shape[2])
+    t1_1 = (imlist[0]/255).unsqueeze(0)
+    t1_2 = (imlist[1]/255).unsqueeze(0)
+    def ready(tens):
+        return (tens * 255).to(torch.uint8)
+    def i8(tens):
+        return tens.to(torch.uint8)
+    # padding = abs(t1_1.shape[2] - t1_2.shape[2])
     # pad = (110,)*4
-    # left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
-    # out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
+    # left_pad = torch.nn.functional.pad(t1_1, (0,0,0,padding))
+    # out_shape = (max(t1_1.shape[-2], t1_2.shape[-2]), t1_1.shape[-1] + t1_2.shape[-1])
     # print(out_shape)
     if variant == 0:
         inputdict = {
-        "image0": K.color.rgb_to_grayscale(left),
-        "image1": K.color.rgb_to_grayscale(right)
+        "image0": K.color.rgb_to_grayscale(t1_1),
+        "image1": K.color.rgb_to_grayscale(t1_2)
         }
-        shp = left.shape
+        shp = t1_1.shape
     else:
         inputdict = {
-        "image0": K.color.rgb_to_grayscale(right),
-        "image1": K.color.rgb_to_grayscale(left)
+        "image0": K.color.rgb_to_grayscale(t1_2),
+        "image1": K.color.rgb_to_grayscale(t1_1)
         }
-        shp = right.shape
+        shp = t1_2.shape
     
     loftr = K.feature.LoFTR(pretrained='outdoor')
-    
+    # IS = K.contrib.ImageStitcher()
+    # IS.blend_image()
     points = loftr(inputdict)
     ransac = K.geometry.RANSAC(max_iter=20, confidence=0.999, max_lo_iters=20) 
     homo = ransac(points["keypoints0"], points["keypoints1"])
     
     
-    # shp = right.shape
+    # shp = t1_2.shape
     
     def transform(points, H):
         # Equation 2.21 Szeliski Computer Vision: Algorithms and Applications
@@ -78,11 +86,11 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     t = transform(points, homo[0])
     tl_prim, tr_prim, bl_prim, br_prim = t[0],t[1],t[2],t[3]
     if variant == 0:
-        x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], right.shape[3], 0
-        y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], right.shape[2], 0
+        x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], t1_2.shape[3], 0
+        y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], t1_2.shape[2], 0
     else:
-        x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], left.shape[3], 0
-        y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], left.shape[2], 0
+        x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], t1_1.shape[3], 0
+        y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], t1_1.shape[2], 0
     
     
     minx, maxx = int(min(x)), int(max(x))
@@ -107,10 +115,13 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     align_corners = True
     
     if variant== 0:
-        src_img = K.geometry.warp_perspective(left, H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
+        src_img = K.geometry.warp_perspective(t1_1, H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
+        src_mask = K.geometry.warp_perspective(torch.ones_like(t1_1), H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
     else:
-        src_img = K.geometry.warp_perspective(right, H, outs, padding_mode=p, align_corners=align_corners, mode=m)
-    
+        src_img = K.geometry.warp_perspective(t1_2, H, outs, padding_mode=p, align_corners=align_corners, mode=m)
+        src_mask = K.geometry.warp_perspective(torch.ones_like(t1_2), H, outs, padding_mode=p, align_corners=align_corners, mode=m)
+
+    # show_image(src_mask.squeeze(0))
     # show_image(src_img.squeeze(0))
     
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html 
@@ -121,41 +132,41 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     minx = abs(minx)
     miny = abs(miny)
     
-    # print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nright.shape: {right.shape}\nsrc_img.shape: {src_img.shape}\nright.shape[2]-height+miny: {right.shape[2]-height+miny} ")
-    # print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nleft.shape: {left.shape}\nsrc_img.shape: {src_img.shape}\nleft.shape[2]-height+miny: {left.shape[2]-height+miny} ")
+    # print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nright.shape: {t1_2.shape}\nsrc_img.shape: {src_img.shape}\nright.shape[2]-height+miny: {t1_2.shape[2]-height+miny} ")
+    # print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nleft.shape: {t1_1.shape}\nsrc_img.shape: {src_img.shape}\nleft.shape[2]-height+miny: {t1_1.shape[2]-height+miny} ")
     if variant == 0:
-        dst_img = torch.nn.functional.pad(right, (minx,right.shape[3]-width+minx, miny, height-miny-right.shape[2]))     
+        dst_img = torch.nn.functional.pad(t1_2, (minx,t1_2.shape[3]-width+minx, miny, height-miny-t1_2.shape[2]))     
+        dst_mask = torch.nn.functional.pad(torch.ones_like(t1_2), (minx,t1_2.shape[3]-width+minx, miny, height-miny-t1_2.shape[2]))     
     else:
-        dst_img = torch.nn.functional.pad(left, (minx, width-minx-left.shape[3], miny, height-miny-left.shape[2]))     
+        dst_img = torch.nn.functional.pad(t1_1, (minx, width-minx-t1_1.shape[3], miny, height-miny-t1_1.shape[2]))     
+        dst_mask = torch.nn.functional.pad(torch.ones_like(t1_1), (minx, width-minx-t1_1.shape[3], miny, height-miny-t1_1.shape[2]))     
+     
+    
+    
     
     dst_img = dst_img.squeeze(0)
     src_img = src_img.squeeze(0)
+    dst_mask = dst_mask.squeeze(0).bool()
+    src_mask = src_mask.squeeze(0).bool()
     
-    src_mask = torch.any(src_img > 0, dim=0, keepdim=True)
-    dst_mask = torch.any(dst_img > 0, dim=0, keepdim=True)
+    # src_mask = torch.any(src_img > 0, dim=0, keepdim=True)
+    # dst_mask = torch.any(dst_img > 0, dim=0, keepdim=True)
     
-    # print(src_mask.shape, src_mask.dtype)
-    # print(dst_mask.shape, dst_mask.dtype)
+    print(src_mask.shape, src_mask.dtype)
+    print(dst_mask.shape, dst_mask.dtype)
     # src_mask = src_mask.repeat(3,1,1)
     # dst_mask = dst_mask.repeat(3,1,1)
     # src_mask[1] = 0
     # src_mask[2] = 0
     
-    def ready(tens):
-        return (tens * 255).to(torch.uint8)
-    def i8(tens):
-        return tens.to(torch.uint8)
+
     
-    if variant == 0:
-        combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
-        # combined_mask = torch.where(src_img.bool(), src_img, dst_img)
-    else:
-        combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
+    # combined_mask = torch.where(src_mask, src_img, dst_img)
+    # combined_mask = torch.where(dst_mask.bool(), dst_img, src_img)
         
             
     
     both = dst_mask & src_mask
-    
     both_dst_img = dst_img * both.float()
     both_src_img = src_img * both.float()
     dif = abs(both_src_img - both_dst_img)
@@ -188,33 +199,26 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     
     # dst= both_dst_img * (dst_dif + src_dif)
     # src = both_src_img * (dst_dif + src_dif)
-        
+    
     dst= both_dst_img * src_dif 
     src = both_src_img * dst_dif
+
+    # t1_1 is src, t1_2 is dst
+    # show dst_img if src_dif is 0 else show src_img
+    #dst_mask if src_dif is 0 else src_mask
+    conditional = (src_mask & (src_dif.to(torch.uint8) == 1)) | ~dst_mask
+    combined_mask = torch.where(conditional, src_img, dst_img)
     
-    write_image(ready(dst),"1.png")
-    write_image(ready(src),"2.png")
-    # show_image(ready(both_dst_img * dif))
-    # dif = K.contrib.connected_components(dif, 300)
-    # print("CCs:", dif.shape)
-
-    # ckern = torch.ones(40, 40)
-    # dif = K.morphology.closing(dif.unsqueeze(0), ckern).squeeze(0)
-    # dif = dst_img * dif
-
-#     print(f"""
-# Both: {both.shape},
-# dst_img: {dst_img.shape},
-# dst_mask: {dst_mask.shape},
-# src_img: {src_img.shape},
-# src_mask: {src_mask.shape},
-# dif: {dif.shape},
-#     """)
-    # write_image(ready(both), "both.png")
-    # write_image(ready(dif), "dif.png")
-    # write_image(ready(dst_img), "dst.png")
-    # write_image(ready(src_img), "src.png")
-    # write_image(ready(combined_mask), "mask.png")
+    conditional2 = (dst_mask & (dst_dif.to(torch.uint8) == 1)) | ~src_mask
+    # combined_mask = torch.where(conditional, dst_img, src_img)
+    
+        
+    
+    write_image(ready(conditional),"mask.png")
+    write_image(ready(conditional2),"mask_alt.png")
+    write_image(ready(combined_mask), "out.png")
+    write_image(ready(src_img), "src.png")
+    write_image(ready(dst_img), "dst.png")
     
     return img
 
