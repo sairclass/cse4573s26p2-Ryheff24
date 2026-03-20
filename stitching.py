@@ -127,6 +127,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         dst_img = torch.nn.functional.pad(right, (minx,right.shape[3]-width+minx, miny, height-miny-right.shape[2]))     
     else:
         dst_img = torch.nn.functional.pad(left, (minx, width-minx-left.shape[3], miny, height-miny-left.shape[2]))     
+    
     dst_img = dst_img.squeeze(0)
     src_img = src_img.squeeze(0)
     
@@ -144,7 +145,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         return (tens * 255).to(torch.uint8)
     def i8(tens):
         return tens.to(torch.uint8)
-    # show_image(dst_img)
+    
     if variant == 0:
         combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
         # combined_mask = torch.where(src_img.bool(), src_img, dst_img)
@@ -161,43 +162,38 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     
     sigma = 8
     filter_size = 6 * sigma + 1
-    erosion_kernel = 8
+    erosion_kernel = 10
     dilation_kernel = 75
-    # dif = K.filters.gaussian_blur2d(dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
-    # dif = torch.threshold(dif, 0.3, 0)
-    # dif = dif.sum(axis=0, keepdim=True)
-    # er_kern = 10
-    # dif = K.morphology.erosion(dif.unsqueeze(0), ekern).squeeze(0)
-    # dif = K.morphology.dilation(dif.unsqueeze(0), dkern).squeeze(0)
-    # dif = torch.any(dif > 0, dim=0, keepdim=True).to(torch.float32)
-    
+
     dst_dif = both_dst_img - both_src_img 
     src_dif = both_src_img - both_dst_img
-    # print(dst_dif.shape, src_dif.shape)
     
     dst_dif = K.filters.gaussian_blur2d(dst_dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
     src_dif = K.filters.gaussian_blur2d(src_dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
-
+    
     dst_dif = dst_dif.sum(axis=0, keepdim=True)
     src_dif = src_dif.sum(axis=0, keepdim=True)
     
     dst_dif = torch.threshold(dst_dif, 0.35, 0)
     src_dif = torch.threshold(src_dif, 0.35, 0)
     
-    ekern = torch.ones(erosion_kernel, erosion_kernel)
-    dkern = torch.ones(dilation_kernel, dilation_kernel)
+    dst_dif = torch.any(dst_dif > 0, dim=0, keepdim=True).to(torch.uint16)
+    src_dif = torch.any(src_dif > 0, dim=0, keepdim=True).to(torch.uint16)
     
-    dst_dif = K.morphology.erosion(dst_dif.unsqueeze(0), ekern).squeeze(0)
-    src_dif = K.morphology.dilation(src_dif.unsqueeze(0), dkern).squeeze(0)
-
-    dst_dif = torch.any(dst_dif > 0, dim=0, keepdim=True).to(torch.uint8)
-    src_dif = torch.any(src_dif > 0, dim=0, keepdim=True).to(torch.uint8)
-
-    dst_dif = both_dst_img * (dst_dif + src_dif)
-    src_dif = both_src_img * (dst_dif + src_dif)
+    dst_dif = K.morphology.erosion(dst_dif.unsqueeze(0), torch.ones(erosion_kernel, erosion_kernel)).squeeze(0)
+    src_dif = K.morphology.erosion(src_dif.unsqueeze(0), torch.ones(erosion_kernel, erosion_kernel)).squeeze(0)
     
-    write_image(ready(dst_dif),"1.png")
-    write_image(ready(src_dif),"2.png")
+    dst_dif = K.morphology.dilation(dst_dif.unsqueeze(0), torch.ones(dilation_kernel, dilation_kernel)).squeeze(0)
+    src_dif = K.morphology.dilation(src_dif.unsqueeze(0), torch.ones(dilation_kernel, dilation_kernel)).squeeze(0)
+    
+    # dst= both_dst_img * (dst_dif + src_dif)
+    # src = both_src_img * (dst_dif + src_dif)
+        
+    dst= both_dst_img * src_dif 
+    src = both_src_img * dst_dif
+    
+    write_image(ready(dst),"1.png")
+    write_image(ready(src),"2.png")
     # show_image(ready(both_dst_img * dif))
     # dif = K.contrib.connected_components(dif, 300)
     # print("CCs:", dif.shape)
@@ -206,19 +202,19 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     # dif = K.morphology.closing(dif.unsqueeze(0), ckern).squeeze(0)
     # dif = dst_img * dif
 
-    print(f"""
-Both: {both.shape},
-dst_img: {dst_img.shape},
-dst_mask: {dst_mask.shape},
-src_img: {src_img.shape},
-src_mask: {src_mask.shape},
-dif: {dif.shape},
-    """)
-    write_image(ready(both), "both.png")
-    write_image(ready(dif), "dif.png")
-    write_image(ready(dst_img), "dst.png")
-    write_image(ready(src_img), "src.png")
-    write_image(ready(combined_mask), "mask.png")
+#     print(f"""
+# Both: {both.shape},
+# dst_img: {dst_img.shape},
+# dst_mask: {dst_mask.shape},
+# src_img: {src_img.shape},
+# src_mask: {src_mask.shape},
+# dif: {dif.shape},
+#     """)
+    # write_image(ready(both), "both.png")
+    # write_image(ready(dif), "dif.png")
+    # write_image(ready(dst_img), "dst.png")
+    # write_image(ready(src_img), "src.png")
+    # write_image(ready(combined_mask), "mask.png")
     
     return img
 
