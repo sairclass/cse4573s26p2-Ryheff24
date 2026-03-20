@@ -5,6 +5,8 @@ Notes:
 3. If you want to show an image for debugging, please use show_image() function in util.py. 
 4. Please do NOT save any intermediate files in your final submission.
 '''
+from matplotlib import axes
+from numpy import var
 import torch
 import kornia as K
 from typing import Dict
@@ -25,7 +27,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
-
+    variant = 0
     torch.manual_seed(1234)
     imlist = list(imgs.values())
     left = (imlist[0]/255).unsqueeze(0)
@@ -36,16 +38,18 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     # left_pad = torch.nn.functional.pad(left, (0,0,0,padding))
     # out_shape = (max(left.shape[-2], right.shape[-2]), left.shape[-1] + right.shape[-1])
     # print(out_shape)
-
-    inputdict = {
-      "image0": K.color.rgb_to_grayscale(left),
-      "image1": K.color.rgb_to_grayscale(right)
-    }
-    
-    # inputdict = {
-    #   "image0": K.color.rgb_to_grayscale(right),
-    #   "image1": K.color.rgb_to_grayscale(left)
-    # }
+    if variant == 0:
+        inputdict = {
+        "image0": K.color.rgb_to_grayscale(left),
+        "image1": K.color.rgb_to_grayscale(right)
+        }
+        shp = left.shape
+    else:
+        inputdict = {
+        "image0": K.color.rgb_to_grayscale(right),
+        "image1": K.color.rgb_to_grayscale(left)
+        }
+        shp = right.shape
     
     loftr = K.feature.LoFTR(pretrained='outdoor')
     IS = K.contrib.ImageStitcher(loftr, estimator='ransac')
@@ -54,7 +58,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     ransac = K.geometry.RANSAC() 
     homo = ransac(points["keypoints0"], points["keypoints1"])
     
-    shp = left.shape
+    
     # shp = right.shape
     
     def transform(points, H):
@@ -75,12 +79,12 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     points = (tl, tr, bl, br)
     t = transform(points, homo[0])
     tl_prim, tr_prim, bl_prim, br_prim = t[0],t[1],t[2],t[3]
-    
-    x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], right.shape[3], 0
-    y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], right.shape[2], 0
-    
-    # x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], left.shape[3], 0
-    # y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], left.shape[2], 0
+    if variant == 0:
+        x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], right.shape[3], 0
+        y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], right.shape[2], 0
+    else:
+        x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], left.shape[3], 0
+        y = tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1], left.shape[2], 0
     
     
     minx, maxx = int(min(x)), int(max(x))
@@ -100,8 +104,10 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     # print("H:", H)
     
     # good stuff
-    src_img = K.geometry.warp_perspective(left, H, outs)
-    # src_img = K.geometry.warp_perspective(right, H, outs)
+    if variant== 0:
+        src_img = K.geometry.warp_perspective(left, H, outs)
+    else:
+        src_img = K.geometry.warp_perspective(right, H, outs)
     
     # show_image(src_img.squeeze())
     # padding = (height-right.shape[2])//2
@@ -115,9 +121,10 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     
     # print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nright.shape: {right.shape}\nsrc_img.shape: {src_img.shape}\nright.shape[2]-height+miny: {right.shape[2]-height+miny} ")
     # print(f"minx: {minx}\nwidth+minx: {width+minx}\nminy: {miny}\nheight+miny: {height+miny}\nleft.shape: {left.shape}\nsrc_img.shape: {src_img.shape}\nleft.shape[2]-height+miny: {left.shape[2]-height+miny} ")
-    
-    dst_img = torch.nn.functional.pad(right, (minx,right.shape[3]-width+minx, miny, height-miny-right.shape[2]))     
-    # dst_img = torch.nn.functional.pad(left, (minx, width-minx-left.shape[3], miny, height-miny-left.shape[2]))     
+    if variant == 0:
+        dst_img = torch.nn.functional.pad(right, (minx,right.shape[3]-width+minx, miny, height-miny-right.shape[2]))     
+    else:
+        dst_img = torch.nn.functional.pad(left, (minx, width-minx-left.shape[3], miny, height-miny-left.shape[2]))     
     dst_img = dst_img.squeeze(0)
     src_img = src_img.squeeze(0)
     
@@ -135,36 +142,49 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     def i8(tens):
         return tens.to(torch.uint8)
     
-    # combined_mask = torch.where(src_img.bool(), src_img, dst_img)
-    combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
-    write_image(ready(combined_mask), "mask.png")
+    if variant == 0:
+        combined_mask = torch.where(dst_img.bool(), dst_img, src_img)
+    else:
+        combined_mask = torch.where(src_img.bool(), src_img, dst_img)
+            
     
     both = dst_mask & src_mask
-    print(f"""
-Both: {both.shape},
-dst_img: {dst_img.shape},
-dst_mask: {dst_mask.shape},
-src_img: {src_img.shape},
-src_mask: {src_mask.shape}
-    """)
     
     # dst_img = dst_img
     # src_img = src_img
     both_dst_img = dst_img * both.float()
     both_src_img = src_img * both.float()
-    
-    dif = abs(both_dst_img - both_src_img)
-    
+    dif = abs(both_src_img - both_dst_img)
+    sigma = 4
+    filter_size = 6 * sigma + 1
+    dif = K.filters.gaussian_blur2d(dif.unsqueeze(0), (filter_size, filter_size), (sigma, sigma)).squeeze(0)
+    # print(dif)
     dif = torch.threshold(dif, 0.3, 0)
+    dif = dif.sum(axis=0, keepdim=True)
     
-    print(dif.shape)
-    
-    # dif = i8(dif)
-    write_image(ready(dif), "dif1.png")
-    # write_image(both, "both.png")
-    
+    # er_kern = 10
+    ekern = torch.ones(8, 8)
+    dif = K.morphology.erosion(dif.unsqueeze(0), ekern).squeeze(0)
+    dkern = torch.ones(75, 75)
+    dif = K.morphology.dilation(dif.unsqueeze(0), dkern).squeeze(0)
+    dif = torch.any(dif > 0, dim=0, keepdim=True)
+    # ckern = torch.ones(40, 40)
+    # dif = K.morphology.closing(dif.unsqueeze(0), ckern).squeeze(0)
+    dif = dst_img * dif
+
+    print(f"""
+Both: {both.shape},
+dst_img: {dst_img.shape},
+dst_mask: {dst_mask.shape},
+src_img: {src_img.shape},
+src_mask: {src_mask.shape},
+dif: {dif.shape},
+    """)
+    write_image(ready(both), "both.png")
+    write_image(ready(dif), "dif.png")
     write_image(ready(dst_img), "dst.png")
     write_image(ready(src_img), "src.png")
+    write_image(ready(combined_mask), "mask.png")
     
     return img
 
