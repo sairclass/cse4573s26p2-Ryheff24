@@ -39,25 +39,23 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     max_lo_iters = 15
     torch.manual_seed(1234)
     # Mask params
-    m = "bilinear" # bilinear bicubic
+    m = "bilinear" # bilinear bicubic%
     p = "zeros" # "zeros" "border" "reflection" "fill"
     align_corners = True
+
+    def ready(tens):
+        if len(tens.shape) == 4:
+            tens = tens.squeeze(0)
+        return (tens * 255).to(torch.uint8)
+
+    def i8(tens):
+        return tens.to(torch.uint8)
+
     if save:
-            
         imlist = list(imgs.values())
-        
         t1_1 = (imlist[0]/255).unsqueeze(0)
         t1_2 = (imlist[1]/255).unsqueeze(0)
-        
-        def ready(tens):
-            if len(tens.shape) == 4:
-                tens = tens.squeeze(0)
-            return (tens * 255).to(torch.uint8)
-        
-        def i8(tens):
-            return tens.to(torch.uint8)
 
-        
         # From Kornia ImageStitcher class source code:
         if variant:
             inputdict = {
@@ -75,7 +73,6 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         loftr = K.feature.LoFTR(pretrained='outdoor')
         points = loftr(inputdict)
         
-
         ransac = K.geometry.RANSAC(inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)
         homo = ransac(points["keypoints0"], points["keypoints1"])
         homo = (homo[0],homo[1])
@@ -117,7 +114,6 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         H = (T @ homo[0]).unsqueeze(0)
         
 
-        
         if variant:
             src_img = K.geometry.warp_perspective(t1_1, H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
             src_mask = K.geometry.warp_perspective(torch.ones_like(t1_1), H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
@@ -129,7 +125,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         # then use (padding_left,padding_right, padding_top,padding_bottom)
         # (at least minx,the width + minx, miny, the height + miny)
         # print(minx,width+minx, miny, height+miny)
-        
+
         minx = abs(minx)
         miny = abs(miny)
         
@@ -165,6 +161,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         torch.save(src_img, f"{save_path}/src_img.pt")
         torch.save(src_mask, f"{save_path}/src_mask.pt")
         torch.save(src_dif, f"{save_path}/src_dif.pt")
+        torch.save(both, f"{save_path}/both.pt")
 
     if load and not save:
         dst_img = torch.load(f"{save_path}/dst_img.pt")
@@ -173,9 +170,10 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         src_img = torch.load(f"{save_path}/src_img.pt")
         src_mask = torch.load(f"{save_path}/src_mask.pt")
         src_dif = torch.load(f"{save_path}/src_dif.pt")
+        both = torch.load(f"{save_path}/both.pt")
+
     
-    
-    alpha = True
+    alpha = False
     
     if alpha:
         sigma = 6
@@ -189,43 +187,39 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         src_dif = torch.threshold(src_dif, 0.1, 0)
 
         
-        low_threshold = 0.1
-        high_threshold = 0.2
+        low_threshold = 0.01
+        high_threshold = 0.5
         dst_dif = K.filters.canny(dst_dif, low_threshold, high_threshold, (filter_size, filter_size), (sigma, sigma))
         src_dif = K.filters.canny(src_dif, low_threshold, high_threshold, (filter_size, filter_size), (sigma, sigma))
         
 
 
-        
     # return img
     else:
-        sigma = 6
+        sigma = 7
         filter_size = 6 * sigma + 1
         erosion_kernel = 12
-        dilation_kernel = 50
+        dilation_kernel = 65
         dst_dif = K.filters.gaussian_blur2d(dst_dif, (filter_size, filter_size), (sigma, sigma))
         src_dif = K.filters.gaussian_blur2d(src_dif, (filter_size, filter_size), (sigma, sigma))
-        
-        dst_dif = dst_dif.sum(axis=1, keepdim=True)
-        src_dif = src_dif.sum(axis=1, keepdim=True)
+        print(dst_dif.shape)
+        dst_dif = dst_dif.sum(dim=1, keepdim=True)
+        src_dif = src_dif.sum(dim=1, keepdim=True)
 
 
-        dst_dif = torch.threshold(dst_dif, 0.15, 0)
-        src_dif = torch.threshold(src_dif, 0.15, 0)
-
+        dst_dif = torch.threshold(dst_dif, 0.33, 0)
+        src_dif = torch.threshold(src_dif, 0.33, 0)
 
         dst_dif = torch.any(dst_dif > 0, dim=1, keepdim=True).to(torch.uint16)
         src_dif = torch.any(src_dif > 0, dim=1, keepdim=True).to(torch.uint16)
 
-
         dst_dif = K.morphology.erosion(dst_dif, torch.ones(erosion_kernel, erosion_kernel))
         src_dif = K.morphology.erosion(src_dif, torch.ones(erosion_kernel, erosion_kernel))
 
-        
+
         dst_dif = K.morphology.dilation(dst_dif, torch.ones(dilation_kernel, dilation_kernel))
         src_dif = K.morphology.dilation(src_dif, torch.ones(dilation_kernel, dilation_kernel))
 
-        
         # t1_1 is src, t1_2 is dst
         # show dst_img if src_dif is 0 else show src_img
         #dst_mask if src_dif is 0 else src_mask
@@ -236,23 +230,63 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         # foreground = K.morphology.erosion(foreground.to(torch.uint16), torch.ones(10, 10))
         
         foreground2 = dst_mask & (dst_dif.to(torch.uint8) == 1)
-        write_image(ready(foreground),"foreground.png")
+        # write_image(ready(foreground),"foreground.png")
         # write_image(ready(foreground2),"foreground2.png")
         
         
         blend_sigma = 4
         blend_filter_size = 6 * sigma + 1
         blur_mask = foreground.to(torch.float32)
-        
-        blur_mask = K.filters.gaussian_blur2d(blur_mask, (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
-        blur_mask = K.morphology.erosion(blur_mask, torch.ones(5, 5))
+        # ------ start blur only objects ------ #
+        # blur_mask = K.filters.gaussian_blur2d(blur_mask, (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
+        # blur_mask = K.morphology.erosion(blur_mask, torch.ones(5, 5))
+
         # blur_mask = blur_mask * both
-        blur_mask = (~dst_mask).to(torch.float32) + blur_mask
-        
+
+        # ------ start overlaps blur ------ #
+
+        # dst_mask = ~dst_mask
+
+        # dst_mask = K.morphology.dilation(dst_mask.float(), torch.ones(30, 30))
+        blend_sigma = 8
+        blend_filter_size = 6 * sigma + 1
+        # dst_mask = K.filters.gaussian_blur2d(dst_mask.float(), (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
+
+
+
+
+        # ------ start smart blur ------ #
+
+        to_blur = (~foreground * both).to(torch.float32)
+        blend_sigma = 2
+        blend_filter_size = 6 * sigma + 1
+        blur_mask = ~dst_mask + blur_mask
+        mask = blur_mask.clone()
+        blur_mask = K.morphology.dilation(blur_mask, torch.ones(13,13))
+        blur_mask = K.filters.gaussian_blur2d(blur_mask, (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
+
+        # blur_mask =  blur_mask
+
+
+        #
+        blend_sigma = 5
+        blend_filter_size = 6 * sigma + 1
+        target_region = mask + to_blur
+        target_region = K.morphology.erosion(target_region, torch.ones(5,5))
+        target_region = K.filters.gaussian_blur2d(target_region, (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
+
+        # blur_mas
+
+
         # feathering equation from slides
         # I_blend = alpha * I_left + (1-alpha) * I_right
+
+        blur_mask = target_region * blur_mask
+
         out = blur_mask * src_img + (1-blur_mask) * dst_img
-            
+        img = ready(out)
+
+
         write_image(ready(blur_mask),"mask.png")
         write_image(ready(out), "out.png")
         write_image(ready(both), "both.png")
@@ -265,6 +299,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         
     return img
 
+
 # ------------------------------------ Task 2 ------------------------------------ #
 def panorama(imgs: Dict[str, torch.Tensor]):
     """
@@ -274,9 +309,51 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         img: panorama, 
         overlap: torch.Tensor of the output image. 
     """
-    img = torch.zeros((3, 256, 256)) # assumed 256*256 resolution. Update this as per your logic.
-    overlap = torch.empty((3, 256, 256)) # assumed empty 256*256 overlap. Update this as per your logic.
+    img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
+    overlap = torch.empty((3, 256, 256), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
+    matcher = K.feature.LoFTR(pretrained='outdoor')
+    img_details = torch.zeros((len(imgs.values()), 4), dtype=torch.float32)
+    x = 0
+    maxwidth = 0
+    maxheight = 0
+    input = imgs.copy()
+    for key, val in input.items():
+        i = input[key].float()
+        if i.max() > 1:
+            i = i / 255
+        if i.ndim == 3:
+            i = i.unsqueeze(0)
+        input[key] = i
+        width = i.shape[3]
+        height = i.shape[2]
+        if width > maxwidth:
+            maxwidth = width
+        if height > maxheight:
+            maxheight = height
+        # print(key, i.shape)
+    # print(maxheight, maxwidth)
+    for key, val in input.items():
+        # pad to max
+
+        width = val.shape[3]
+        height = val.shape[2]
+        rightpad = 0
+        bottompad = 0
+        if width < maxwidth:
+            rightpad = maxwidth - width
+        if height < maxheight:
+            bottompad = maxheight - height
+        input[key] = torch.nn.functional.pad(val, (0, rightpad, 0, bottompad))
+        # print(input[key].shape, rightpad, bottompad)
+        # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html
+        # then use (padding_left,padding_right, padding_top,padding_bottom)
+        # (at least minx,the width + minx, miny, the height + miny)
+        # print(minx,width+minx, miny, height+miny)
+        # dst_img = torch.nn.functional.pad(t1_2, (minx,t1_2.shape[3]-width+minx, miny, height-miny-t1_2.shape[2]))
+    IS = K.contrib.ImageStitcher(matcher, estimator='ransac')
+    with torch.no_grad():
+        out = IS(*input.values())
 
     return img, overlap
