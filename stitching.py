@@ -5,6 +5,8 @@ Notes:
 3. If you want to show an image for debugging, please use show_image() function in util.py. 
 4. Please do NOT save any intermediate files in your final submission.
 '''
+import collections
+
 import torch
 import kornia as K
 from typing import Dict
@@ -24,6 +26,18 @@ def ready(img):
 
 def i8(tens):
     return tens.to(torch.uint8)
+
+def transform(points, H):
+    # Equation 2.21 Szeliski Computer Vision: Algorithms and Applications
+    out = []
+    for point in points:
+        x = point[0]
+        y = point[1]
+        h = H
+        x_prime = (h[0][0]*x + h[0][1]*y + h[0][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
+        y_prime = (h[1][0]*x + h[1][1]*y + h[1][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
+        out.append((int(x_prime.round()), int(y_prime.round())))
+    return tuple(out)
 
 def stitch_background(imgs: Dict[str, torch.Tensor]):
     """
@@ -73,17 +87,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     homo = ransac(points["keypoints0"], points["keypoints1"])
     homo = (homo[0],homo[1])
 
-    def transform(points, H):
-        # Equation 2.21 Szeliski Computer Vision: Algorithms and Applications
-        out = []
-        for point in points:
-            x = point[0]
-            y = point[1]
-            h = H
-            x_prime = (h[0][0]*x + h[0][1]*y + h[0][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
-            y_prime = (h[1][0]*x + h[1][1]*y + h[1][2])/(h[2][0]*x + h[2][1]*y + h[2][2])
-            out.append((int(x_prime.round()), int(y_prime.round())))
-        return tuple(out)
+
     # print(shp)
 
     tl,tr = (0, 0), (shp[3],0)
@@ -201,8 +205,6 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     img = ready(out)
 
     return img
-
-
 # ------------------------------------ Task 2 ------------------------------------ #
 def panorama(imgs: Dict[str, torch.Tensor]):
     """
@@ -216,52 +218,55 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     overlap = torch.empty((3, 256, 256), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
-    img_details = torch.zeros((len(imgs.values()), 4), dtype=torch.float32)
-    x = 0
-    maxwidth = 0
-    maxheight = 0
-    input = imgs.copy()
-    for key, val in input.items():
-        i = input[key].float()
-        if i.max() > 1:
-            i = i / 255
-        if i.ndim == 3:
-            i = i.unsqueeze(0)
-        input[key] = i
-        width = i.shape[3]
-        height = i.shape[2]
-        if width > maxwidth:
-            maxwidth = width
-        if height > maxheight:
-            maxheight = height
-        # print(key, i.shape)
-    # print(maxheight, maxwidth)
-    for key, val in input.items():
+    save = False
+    load = True
+    data = {}
+    if save or not load:
+        dedode = K.feature.DeDoDe.from_pretrained(detector_weights="L-C4-v2", descriptor_weights="B-upright")
+        lg = K.feature.LightGlue("disk").eval()
 
-        # pad to max
-        width = val.shape[3]
-        height = val.shape[2]
+        for k, v in imgs.items():
+            v = v/255
 
-        rightpad = 0
-        bottompad = 0
-        # if width < maxwidth:
-        #     rightpad = maxwidth - width
-        if height < maxheight:
-            # bottompad = maxheight - height
-        # input[key] = torch.nn.functional.pad(val, (0, 0, 0, bottompad))
-            bottompad = maxheight - height
-        input[key] = torch.nn.functional.pad(val, (0, rightpad, 0, bottompad))
+            if v.ndim == 3:
+                v = v.unsqueeze(0)
+            keypoints, scores, descriptors = dedode(v, apply_imagenet_normalization=True)
+            data[k]= keypoints, scores, descriptors
+        torch.save(data, 'data/data.pth')
+        print("description done")
 
-        # print(input[key].shape, rightpad, bottompad)
-        # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.pad.html
-        # then use (padding_left,padding_right, padding_top,padding_bottom)
-        # (at least minx,the width + minx, miny, the height + miny)
-        # print(minx,width+minx, miny, height+miny)
+    if load:
+        data = torch.load('data/data.pth')
 
-    matcher = K.feature.LoFTR(pretrained='outdoor')
+    count = len(data)
 
-    IS = K.contrib.ImageStitcher(matcher, estimator='ransac')
-    with torch.no_grad():
-        out = IS(*input.values())
+    # matches = collections.defaultdict(list)
+    matches = []
+    matcher = K.feature.match_smnn
+    keys = list(imgs.keys())
+    matchcount = [0] * len(keys)
+    for i in range(len(keys)):
+        # print(k)
+        for j in range(i + 1, len(keys)):
+            k1 = keys[i]
+            k2 = keys[j]
+
+            match = matcher(data[k1][2].squeeze(0), data[k2][2].squeeze(0))
+
+            match_count = match[0].shape[0]
+            matchcount[i] += match_count
+            matchcount[j] += match_count
+            print(k1, k2, match[0].shape)
+            if match_count > 30:
+
+                d = {
+                    "image0": {"keypoints": data[k1][0], "descriptors": data[k1][2], "image": imgs[k1]},
+                    "image1": {"keypoints": data[k2][0], "descriptors": data[k2][2], "image": imgs[k2]},
+                }
+                matches.append((k1, k2, d))
+
+    ref = max(matchcount)
+    refkey = keys[matchcount.index(ref)]
+    print(refkey, ref)
 
     return img, overlap
