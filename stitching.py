@@ -10,6 +10,8 @@ import collections
 import torch
 import kornia as K
 from typing import Dict
+
+from multi_img_output import better_show
 from utils import show_image
 
 '''
@@ -115,7 +117,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     T = torch.tensor([[1, 0, -minx],[0, 1 ,-miny],[0, 0, 1]], dtype=torch.float32)
     H = (T @ homo[0]).unsqueeze(0)
 
-    print(H, minx, miny, maxx, maxy, width, height)
+    # print(H, minx, miny, maxx, maxy, width, height)
     if variant:
         src_img = K.geometry.warp_perspective(t1_1, H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
         src_mask = K.geometry.warp_perspective(torch.ones_like(t1_1), H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
@@ -213,26 +215,28 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     Args:
         imgs: dict {filename: CxHxW tensor} for task-2.
     Returns:
-        img: panorama, 
-        overlap: torch.Tensor of the output image. 
+        img: panorama,
+        overlap: torch.Tensor of the output image.
     """
     img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
     overlap = torch.empty((3, 256, 256), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
-    save = False
+    save = True
     load = True
     data = {}
+    for k, v in imgs.items():
+        v = v / 255
+        if v.ndim == 3:
+            v = v.unsqueeze(0)
+        imgs[k] = v
+    keys = list(imgs.keys())
+
     if save or not load:
         dedode = K.feature.DeDoDe.from_pretrained(detector_weights="L-C4-v2", descriptor_weights="B-upright")
         lg = K.feature.LightGlue("disk").eval()
 
         for k, v in imgs.items():
-            v = v/255
-
-            if v.ndim == 3:
-                v = v.unsqueeze(0)
-            imgs[k] = v
             keypoints, scores, descriptors = dedode(v, apply_imagenet_normalization=True)
             data[k] = {
                 "dedode": (keypoints, scores, descriptors),
@@ -240,10 +244,13 @@ def panorama(imgs: Dict[str, torch.Tensor]):
             }
         print("descriptors done")
         matcher = K.feature.match_smnn
-        keys = list(imgs.keys())
-        matchcount = [0] * len(keys)
-        loftr = K.feature.LoFTR(pretrained='outdoor')
-        ransac = K.geometry.RANSAC()
+        loftr = K.feature.LoFTR(pretrained='indoor_new')
+        # RANSAC params
+        inl_th = 1.5
+        max_iter = 50
+        confidence = 0.999
+        max_lo_iters = 15
+        ransac = K.geometry.RANSAC("homography", inl_th, max_iter, max_lo_iters, confidence)
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
                 k1 = keys[i]
@@ -263,7 +270,14 @@ def panorama(imgs: Dict[str, torch.Tensor]):
                     }
                     points = loftr(inputdict)
                     homo = ransac(points["keypoints0"], points["keypoints1"])
-                    data[k1][k2] = homo[0]
+
+                    # print(k1, k2)
+                    # prints:
+                    # t2_1.png t2_2.png
+                    # t2_1.png t2_4.png
+                    # t2_2.png t2_3.png
+                    # t2_2.png t2_4.png
+                    data[k1][k2] = torch.linalg.inv(homo[0])
                     data[k2][k1] = homo[0]
 
         torch.save(data, 'data/data.pth')
@@ -273,36 +287,69 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         data = torch.load('data/data.pth')
 
     ref = max(data, key=lambda x: data[x]["matches"])
+
     #bfs
     Q = collections.deque()
     visited = set()
-
+    qlog = [ref]
     visited.add(ref)
     Q.append(ref)
-    homos = {ref: torch.eye(3)}
+    Hs = {ref: torch.eye(3)}
     while Q:
         cur = Q.popleft()
+        print(cur, data[cur].keys())
         for k, v in data[cur].items(): # neighbors but skip the 2 keys and visited checks
             if k == "matches" or k == "dedode" or k in visited:
                 continue
 
             Q.append(k)
             visited.add(k)
-
+            qlog.append(k)
             # compute transformations of neighbor to cur
-            homo = homos[cur] @ data[cur][k]
-            homos[k] = homo
+            homo = Hs[cur] @ data[cur][k]
+            Hs[k] = homo
+    # print(qlog)
+    print("BFS done")
+    x = [0]
+    y = [0]
+    for k, v in imgs.items():
+        shp = v.shape
+        H = Hs[k]
+        tl, tr = (0, 0), (shp[3], 0)
+        bl, br = (0, shp[2]), (shp[3], shp[2])
+        points = (tl, tr, bl, br)
+        t = transform(points, H)
+        tl_prim, tr_prim, bl_prim, br_prim = t[0], t[1], t[2], t[3] #_prim 0 is x, 1 is y
+        x.extend([tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0]])
+        y.extend([tl_prim[1], tr_prim[1], bl_prim[1], br_prim[1]])
+    print("warping...")
+    x_max, y_max = max(x), max(y)
+    x_min, y_min = min(x), min(y)
+    width = x_max-x_min
+    height = y_max-y_min
+    outs = (height, width)
+    final = torch.zeros(outs)
+    # homo needs transform
+    T = torch.tensor([[1, 0, -x_min],[0, 1 ,-y_min],[0, 0, 1]], dtype=torch.float32)
+    out = []
+    for k in keys:
+        H = Hs[k]
+        H = (T @ H).unsqueeze(0)
+        src_img = K.geometry.warp_perspective(imgs[k], H, outs)
+        src_mask = K.geometry.warp_perspective(torch.ones_like(imgs[k]), H, outs)
+        data[k] = {
+            "warped": src_img,
+            "mask": src_mask
+        }
+        out.append(src_img)
+        final = torch.where(src_mask == 1, src_img, final)
+        # better_show(final)
 
+    img = ready(final)
 
+    # H = (T @ homo[0]).unsqueeze(0)
+    # src_img = K.geometry.warp_perspective(t1_1, H, outs)  # change mode
+    # src_mask = K.geometry.warp_perspective(torch.ones_like(t1_1))
 
-
-    #
-    # shp = imgs[ref].shape
-    # print(shp)
-    # tl, tr = (0, 0), (shp[3], 0)
-    # bl, br = (0, shp[2]), (shp[3], shp[2])
-    # points = (tl, tr, bl, br)
-    # t = transform(points, homo[0])
-    # tl_prim, tr_prim, bl_prim, br_prim = t[0], t[1], t[2], t[3]
 
     return img, overlap
