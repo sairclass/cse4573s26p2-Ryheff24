@@ -56,8 +56,8 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     # RANSAC params
     inl_th = 1.5
     max_iter = 100
-    confidence = 0.999
-    max_lo_iters = 15
+    confidence = 0.9999
+    max_lo_iters = 20
     # torch.manual_seed(1234)
     # Mask params
     m = "bilinear" # bilinear bicubic%
@@ -142,11 +142,10 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
         dst_img = torch.nn.functional.pad(t1_1, (minx, width-minx-t1_1.shape[3], miny, height-miny-t1_1.shape[2]))
         dst_mask = torch.nn.functional.pad(torch.ones_like(t1_1), (minx, width-minx-t1_1.shape[3], miny, height-miny-t1_1.shape[2]))
 
-    dst_mask = dst_mask.bool()
-    src_mask = src_mask.bool()
+    dst_mask = (dst_mask>.5).bool()
+    src_mask = (src_mask>.5).bool()
     # print(src_mask.shape, src_mask.dtype)
     # print(dst_mask.shape, dst_mask.dtype)
-
     both = dst_mask & src_mask
 
     both_dst_img = dst_img * both.float()
@@ -191,7 +190,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     blend_filter_size = 7
     blur_mask = ~dst_mask + blur_mask
     mask = blur_mask.clone()
-    blur_mask = K.morphology.dilation(blur_mask, torch.ones(7, 7))
+    blur_mask = K.morphology.dilation(blur_mask, torch.ones(9, 9))
     blur_mask = K.filters.gaussian_blur2d(blur_mask, (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
 
     blend_sigma = 2
@@ -200,8 +199,8 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     target_region = mask + to_blur
     target_region = K.morphology.erosion(target_region, torch.ones(7,7))
     target_region = K.filters.gaussian_blur2d(target_region, (blend_filter_size, blend_filter_size), (blend_sigma, blend_sigma))
-    blur_mask = target_region * blur_mask
 
+    blur_mask = target_region * blur_mask
     # feathering equation from slides
     # I_blend = alpha * I_left + (1-alpha) * I_right
 
@@ -229,7 +228,15 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     data = {}
     max_h = 0
     max_w = 0
-    matchalgo = "lightglue" # LoFTR
+    matchalgo = "lightglue" # loftr
+    # save = False
+    # load = True
+    # RANSAC params
+    inl_th = 1
+    max_iter = 200
+    confidence = 0.9999
+    max_lo_iters = 20
+
     loftr = None
     lg = None
     for k, v in imgs.items():
@@ -262,15 +269,14 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         loftr = K.feature.LoFTR(pretrained='indoor_new')
     else:
         lg = K.feature.LightGlue("disk").eval().to(device)
-    # RANSAC params
-    inl_th = 1
-    max_iter = 200
-    confidence = 0.9999
-    max_lo_iters = 20
-    ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)#.to(device)
 
+    ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)#.to(device)
+    print("descriptors done")
     with torch.no_grad():
         for i in range(len(keys)):
+            # if not save and load:
+            #     print("skipping ransac")
+            #     break
             for j in range(i + 1, len(keys)):
 
                 k1 = keys[i]
@@ -332,7 +338,16 @@ def panorama(imgs: Dict[str, torch.Tensor]):
                         # print()
                         data[k1][k2] = torch.linalg.inv(homo[0].cpu())
                         data[k2][k1] = homo[0].cpu()
-    # torch.save(data, 'data/data.pth')
+            # torch.save(data, 'data/data.pth')
+    print("Ransac Done")
+
+    del matcher
+    if matchalgo == "loftr":
+        del loftr
+    else:
+        del lg
+    if device == torch.device("mps"):
+        torch.mps.empty_cache()
 
     # if load:
     #     data = torch.load('data/data.pth')
@@ -360,6 +375,7 @@ def panorama(imgs: Dict[str, torch.Tensor]):
             Hs[k] = homo
     x = [0]
     y = [0]
+    print("bfs done")
     for k, v in imgs.items():
         shp = v.shape
         H = Hs[k]
@@ -378,27 +394,48 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     final = torch.zeros(outs)
     # homo needs transform
     T = torch.tensor([[1, 0, -x_min],[0, 1 ,-y_min],[0, 0, 1]], dtype=torch.float32)
-    out = []
+    out_imgs = []
+    out_masks = []
     finalm = None
+    print("corners warped")
+    import time
     for k in keys:
+        start = time.perf_counter()
         H = Hs[k]
         H = (T @ H).unsqueeze(0)
         src_img = K.geometry.warp_perspective(imgs[k], H, outs)
         src_mask = K.geometry.warp_perspective(torch.ones_like(imgs[k]), H, outs)
-        # data[k] = {
-        #     "warped": src_img,
-        #     "mask": src_mask
-        # }
-        out.append(src_img)
+        src_mask = (src_mask > 0.5).to(torch.float32)
+        warptime = time.perf_counter()
 
-        # src_blur_mask
-        final = torch.where(src_mask > 0.5, src_img, final)
+        blend_sigma = 2
+        blend_filter_size = 6 * blend_sigma + 1
+        # blend_filter_size = 9
+
+        # src_mask = K.morphology.erosion(src_mask, torch.ones(blend_filter_size, blend_filter_size)).to(torch.float32)
+        src_mask = -torch.nn.functional.max_pool2d(-src_mask.to(device), kernel_size=blend_filter_size, stride=1, padding=blend_filter_size//2).cpu()
+        erodetime = time.perf_counter()
+        src_mask = K.filters.gaussian_blur2d(src_mask, (blend_filter_size, blend_filter_size),(blend_sigma, blend_sigma))
+
+        blurtime = time.perf_counter()
+
+        # final = torch.where(src_mask > 0.5, src_img, final)
+        # src_mask = (src_mask > 0.5)
+
         if finalm is None:
             finalm = src_mask
         else:
             finalm = finalm + src_mask
+        out_imgs.append(src_img)
+        out_masks.append(src_mask)
 
-    better_show(finalm)
+        # I_blend = alpha * I_left + (1-alpha) * I_right
+        final = src_mask * src_img + (1 - src_mask) * final
+        blendtime = time.perf_counter()
+        print(f"total time: {blendtime - start}, warptime: {warptime- start}, erodetime: {erodetime- warptime}, blurtime: {blurtime-erodetime} blendtime: {blendtime-blurtime}")
+
+    # better_show(*out_masks)
+    # better_show(finalm, final)
     img = ready(final)
 
     # H = (T @ homo[0]).unsqueeze(0)
