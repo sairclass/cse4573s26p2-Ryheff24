@@ -229,8 +229,6 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     max_h = 0
     max_w = 0
     matchalgo = "lightglue" # loftr
-    # save = False
-    # load = True
     # RANSAC params
     inl_th = 1
     max_iter = 200
@@ -250,117 +248,147 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         max_w = max(max_w, v.shape[3])
 
     keys = list(imgs.keys())
+    edges = []
+    save = True
+    load = True
 
-    disk = K.feature.DISK.from_pretrained("depth").to(device)
-    for k, v in imgs.items():
-        features = disk(v.to(device), pad_if_not_divisible=True)[0]
-        data[k] = {
-            "points": (features.keypoints.cpu(), features.descriptors.cpu()),
-            "matches": 0
-        }
-    del disk
+    if save or not load:
+        disk = K.feature.DISK.from_pretrained("depth").to(device)
+        for k, v in imgs.items():
+            features = disk(v.to(device), pad_if_not_divisible=True)[0]
+            data[k] = {
+                "points": (features.keypoints.cpu(), features.descriptors.cpu()),
+                "matches": 0
+            }
+        del disk
 
-    if device == torch.device("mps"):
-        torch.mps.empty_cache()
+        if device == torch.device("mps"):
+            torch.mps.empty_cache()
 
-    matcher = K.feature.match_smnn
+        matcher = K.feature.match_smnn
 
-    if matchalgo == "loftr":
-        loftr = K.feature.LoFTR(pretrained='indoor_new')
-    else:
-        lg = K.feature.LightGlue("disk").eval().to(device)
+        if matchalgo == "loftr":
+            loftr = K.feature.LoFTR(pretrained='indoor_new')
+        else:
+            lg = K.feature.LightGlue("disk").eval().to(device)
 
-    ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)#.to(device)
-    print("descriptors done")
-    with torch.no_grad():
-        for i in range(len(keys)):
-            # if not save and load:
-            #     print("skipping ransac")
-            #     break
-            for j in range(i + 1, len(keys)):
+        ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)#.to(device)
+        print("descriptors done")
 
-                k1 = keys[i]
-                k2 = keys[j]
-                k1keypoints, k1descriptors = data[k1]["points"]
-                k2keypoints, k2descriptors = data[k2]["points"]
+        with torch.no_grad():
+            for i in range(len(keys)):
+                for j in range(i + 1, len(keys)):
 
-                # k1d = data[k1]["dedode"][2].squeeze(0)
-                # k2d = data[k2]["dedode"][2].squeeze(0)
+                    k1 = keys[i]
+                    k2 = keys[j]
+                    k1keypoints, k1descriptors = data[k1]["points"]
+                    k2keypoints, k2descriptors = data[k2]["points"]
 
-                match = matcher(k1descriptors, k2descriptors)
+                    # k1d = data[k1]["dedode"][2].squeeze(0)
+                    # k2d = data[k2]["dedode"][2].squeeze(0)
 
-                match_count = match[0].shape[0]
-                data[k1]["matches"] += match_count
-                data[k2]["matches"] += match_count
+                    match = matcher(k1descriptors, k2descriptors)
 
-                if match_count > 30:
-                    overlap[i, j] = 1
-                    overlap[j, i] = 1
-                    if matchalgo == "loftr":
-                        # print(f"\r{k1}, {k2} LoFTR starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
+                    match_count = match[0].shape[0]
+                    data[k1]["matches"] += match_count
+                    data[k2]["matches"] += match_count
+                    if match_count > 30:
+                        overlap[i, j] = 1
+                        overlap[j, i] = 1
+                        if matchalgo == "loftr":
+                            # print(f"\r{k1}, {k2} LoFTR starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
 
-                        inputdict = {
-                            "image0": K.color.rgb_to_grayscale(imgs[k1]),
-                            "image1": K.color.rgb_to_grayscale(imgs[k2])
-                        }
-                        points = loftr(inputdict)
-                        # print(f"\r{k1}, {k2} RANSAC starting. LoFTR Matches: {points['keypoints0'].shape}{'':>20}",  end="", flush=True)
+                            inputdict = {
+                                "image0": K.color.rgb_to_grayscale(imgs[k1]),
+                                "image1": K.color.rgb_to_grayscale(imgs[k2])
+                            }
+                            points = loftr(inputdict)
+                            # print(f"\r{k1}, {k2} RANSAC starting. LoFTR Matches: {points['keypoints0'].shape}{'':>20}",  end="", flush=True)
 
-                        homo = ransac(points["keypoints0"], points["keypoints1"])
+                            homo = ransac(points["keypoints0"], points["keypoints1"])
 
-                        # homo = ransac(points["keypoints0"].to(device), points["keypoints1"].to(device))
-                        # print(f"\r{k1}, {k2} RANSAC Finished. LoFTR matches: {points['keypoints0'].shape}, RANSAC inliers: {homo[1].sum()}",  end="", flush=True)
-                        # print()
+                            # homo = ransac(points["keypoints0"].to(device), points["keypoints1"].to(device))
+                            # print(f"\r{k1}, {k2} RANSAC Finished. LoFTR matches: {points['keypoints0'].shape}, RANSAC inliers: {homo[1].sum()}",  end="", flush=True)
+                            # print()
 
-                        data[k1][k2] = torch.linalg.inv(homo[0].cpu())
-                        data[k2][k1] = homo[0].cpu()
-                    else:
-                        # print(f"\r{k1}, {k2} LightGlue starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
+                            data[k1][k2] = torch.linalg.inv(homo[0].cpu())
+                            data[k2][k1] = homo[0].cpu()
+                        else:
+                            # print(f"\r{k1}, {k2} LightGlue starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
 
 
-                        inputdict = {
-                            "image0": {"keypoints": k1keypoints.unsqueeze(0).to(device), "descriptors": k1descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k1].shape[3], imgs[k1].shape[2]]], device=device)},
-                            "image1": {"keypoints": k2keypoints.unsqueeze(0).to(device), "descriptors": k2descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k2].shape[3], imgs[k2].shape[2]]], device=device)}
-                        }
+                            inputdict = {
+                                "image0": {"keypoints": k1keypoints.unsqueeze(0).to(device), "descriptors": k1descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k1].shape[3], imgs[k1].shape[2]]], device=device)},
+                                "image1": {"keypoints": k2keypoints.unsqueeze(0).to(device), "descriptors": k2descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k2].shape[3], imgs[k2].shape[2]]], device=device)}
+                            }
 
-                        out = lg(inputdict)
-                        match = out["matches"][0].cpu()
+                            out = lg(inputdict)
+                            match = out["matches"][0].cpu()
 
-                        k1matches = k1keypoints[match[:, 0]]
-                        k2matches = k2keypoints[match[:, 1]]
+                            k1matches = k1keypoints[match[:, 0]]
+                            k2matches = k2keypoints[match[:, 1]]
 
-                        # print(f"\r{k1}, {k2} LightGlue Finished. LightGlue matches: {k2matches.shape[0]}, img shape: {imgs[k1].shape}{'':>20}",  end="", flush=True)
+                            # print(f"\r{k1}, {k2} LightGlue Finished. LightGlue matches: {k2matches.shape[0]}, img shape: {imgs[k1].shape}{'':>20}",  end="", flush=True)
 
-                        homo = ransac(k1matches, k2matches)
+                            homo = ransac(k1matches, k2matches)
 
-                        # homo = ransac(k1matches.to(device), k2matches.to(device))
-                        # print(f"\r{k1}, {k2} RANSAC Finished. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, img shape: {imgs[k1].shape}",  end="", flush=True)
-                        # print()
-                        data[k1][k2] = torch.linalg.inv(homo[0].cpu())
-                        data[k2][k1] = homo[0].cpu()
-            # torch.save(data, 'data/data.pth')
-    print("Ransac Done")
+                            # homo = ransac(k1matches.to(device), k2matches.to(device))
+                            print(f"\r{k1}, {k2} RANSAC Finished. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, Prelim matches: {match_count}, img shape: {imgs[k1].shape}",  end="", flush=True)
+                            print()
+                            if homo[1].sum().cpu() < 150:
+                                continue
+                            data[k1][k2] = torch.linalg.inv(homo[0].cpu())
+                            data[k2][k1] = homo[0].cpu()
+                            edges.append((k1, k2, homo[1].sum().cpu()))
 
-    del matcher
-    if matchalgo == "loftr":
-        del loftr
-    else:
-        del lg
-    if device == torch.device("mps"):
-        torch.mps.empty_cache()
+        torch.save(data, "data/data.pth")
+        torch.save(overlap, "data/overlap.pth")
+        torch.save(edges, "data/edges.pth")
 
-    # if load:
-    #     data = torch.load('data/data.pth')
+        del matcher
+        if matchalgo == "loftr":
+            del loftr
+        else:
+            del lg
+        if device == torch.device("mps"):
+            torch.mps.empty_cache()
+        print("Ransac Done")
 
+    if load or not save:
+        data = torch.load("data/data.pth")
+        overlap = torch.load("data/overlap.pth")
+        edges = torch.load("data/edges.pth")
+
+    mst = False
     ref = max(data, key=lambda l: data[l]["matches"])
+    Hsm = {ref: torch.eye(3)}
+    Hsb = {ref: torch.eye(3)}
+    print("first:", ref)
+    edges = sorted(edges, key=lambda f: f[2])
+    v = set()
+    v.add(ref)
+    while len(keys) > len(v):
+        for e in edges:
+            k1, k2, _ = e
+            if k1 in v and k2 not in v:
+                # add it
+                Hsm[k2] = Hsm[k1] @ data[k1][k2]
+                print(f"mst computing change: {k1}->{k2}")
+                v.add(k2)
+                edges.remove(e)
+                break
+            if k2 in v and k1 not in v:
+                Hsm[k1] = Hsm[k2] @ data[k2][k1]
+                print(f"mst computing change: {k2}->{k1}")
 
-    #bfs
+                v.add(k1)
+                edges.remove(e)
+                break
+
     Q = collections.deque()
     visited = set()
-    qlog = [ref]
     visited.add(ref)
     Q.append(ref)
-    Hs = {ref: torch.eye(3)}
     while Q:
         cur = Q.popleft()
         for k, v in data[cur].items(): # neighbors but skip the 2 keys and visited checks
@@ -369,10 +397,21 @@ def panorama(imgs: Dict[str, torch.Tensor]):
 
             Q.append(k)
             visited.add(k)
-            qlog.append(k)
             # compute transformations of neighbor to cur
-            homo = Hs[cur] @ data[cur][k]
-            Hs[k] = homo
+            print(f"bfs computing change: {cur}->{k}")
+
+            homo = Hsb[cur] @ data[cur][k]
+            Hsb[k] = homo
+    if mst:
+        Hs = Hsm
+    else:
+        Hs = Hsm
+
+    for i in keys:
+        if not torch.equal(Hsm[i], Hsb[i]):
+            print(f"{i} FAILED: {Hsm[i]} != {Hsb[i]} ")
+
+
     x = [0]
     y = [0]
     print("bfs done")
@@ -399,25 +438,22 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     finalm = None
     print("corners warped")
     import time
+
     for k in keys:
-        start = time.perf_counter()
         H = Hs[k]
         H = (T @ H).unsqueeze(0)
         src_img = K.geometry.warp_perspective(imgs[k], H, outs)
         src_mask = K.geometry.warp_perspective(torch.ones_like(imgs[k]), H, outs)
         src_mask = (src_mask > 0.5).to(torch.float32)
-        warptime = time.perf_counter()
 
         blend_sigma = 2
         blend_filter_size = 6 * blend_sigma + 1
         # blend_filter_size = 9
 
         # src_mask = K.morphology.erosion(src_mask, torch.ones(blend_filter_size, blend_filter_size)).to(torch.float32)
-        src_mask = -torch.nn.functional.max_pool2d(-src_mask.to(device), kernel_size=blend_filter_size, stride=1, padding=blend_filter_size//2).cpu()
-        erodetime = time.perf_counter()
-        src_mask = K.filters.gaussian_blur2d(src_mask, (blend_filter_size, blend_filter_size),(blend_sigma, blend_sigma))
+        # src_mask = -torch.nn.functional.max_pool2d(-src_mask.to(device), kernel_size=blend_filter_size, stride=1, padding=blend_filter_size//2).cpu()
+        # src_mask = K.filters.gaussian_blur2d(src_mask, (blend_filter_size, blend_filter_size),(blend_sigma, blend_sigma))
 
-        blurtime = time.perf_counter()
 
         # final = torch.where(src_mask > 0.5, src_img, final)
         # src_mask = (src_mask > 0.5)
@@ -431,16 +467,12 @@ def panorama(imgs: Dict[str, torch.Tensor]):
 
         # I_blend = alpha * I_left + (1-alpha) * I_right
         final = src_mask * src_img + (1 - src_mask) * final
-        blendtime = time.perf_counter()
-        print(f"total time: {blendtime - start}, warptime: {warptime- start}, erodetime: {erodetime- warptime}, blurtime: {blurtime-erodetime} blendtime: {blendtime-blurtime}")
+        # print(f"total time: {blendtime - start}, warptime: {warptime- start}, erodetime: {erodetime- warptime}, blurtime: {blurtime-erodetime} blendtime: {blendtime-blurtime}")
 
     # better_show(*out_masks)
     # better_show(finalm, final)
     img = ready(final)
 
-    # H = (T @ homo[0]).unsqueeze(0)
-    # src_img = K.geometry.warp_perspective(t1_1, H, outs)  # change mode
-    # src_mask = K.geometry.warp_perspective(torch.ones_like(t1_1))
 
 
     return img, overlap
