@@ -222,52 +222,91 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     overlap = torch.empty((3, 256, 256), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
-    save = True
-    load = True
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     data = {}
     max_h = 0
     max_w = 0
+    descriptor = "disk" # dedode
+    matchalgo = "lightglue" # lightglue
+    loftr = None
+    dedode = None
+    disk = None
+    lg = None
     for k, v in imgs.items():
 
         v = v / 255
         if v.ndim == 3:
             v = v.unsqueeze(0)
+        if v.shape[3] > 900 or v.shape[2] > 900:
+            v = torch.nn.functional.interpolate(v, scale_factor=0.5, mode="bilinear", align_corners=False)
         imgs[k] = v
         max_h = max(max_h, v.shape[2])
         max_w = max(max_w, v.shape[3])
+
     keys = list(imgs.keys())
-    for k, v in imgs.items():
-        imgs[k] = torch.nn.functional.pad(v, (0,  max_w - imgs[k].shape[3], 0, max_h - imgs[k].shape[2]))
+
+    # for k, v in imgs.items():
+        # imgs[k] = torch.nn.functional.pad(v, (0,  max_w - imgs[k].shape[3], 0, max_h - imgs[k].shape[2]))
         # print(imgs[k].shape)
-    if save or not load:
-        dedode = K.feature.DeDoDe.from_pretrained(detector_weights="L-C4-v2", descriptor_weights="B-upright")
-        lg = K.feature.LightGlue("dedodeb").eval()
+
+    if descriptor == "disk":
+        disk = K.feature.DISK.from_pretrained("depth").to(device)
+        for k, v in imgs.items():
+            features = disk(v.to(device), pad_if_not_divisible=True)[0]
+            data[k] = {
+                "points": (features.keypoints.cpu(), features.descriptors.cpu()),
+                "matches": 0
+            }
+        del disk
+    else:
+        dedode = K.feature.DeDoDe.from_pretrained(detector_weights="L-C4-v2", descriptor_weights="B-upright").to(device)
 
         for k, v in imgs.items():
 
-            keypoints, scores, descriptors = dedode(v, apply_imagenet_normalization=True)
+            keypoints, _, descriptors = dedode(v.to(device), apply_imagenet_normalization=True, n=1000) #n=2000
             data[k] = {
-                "dedode": (keypoints, scores, descriptors),
+                "points": (keypoints.cpu(), descriptors.cpu()),
                 "matches": 0
             }
-        print("descriptors done")
-        matcher = K.feature.match_smnn
-        loftr = K.feature.LoFTR(pretrained='indoor_new')
-        # RANSAC params
-        inl_th = 1.5
-        max_iter = 50
-        confidence = 0.999
-        max_lo_iters = 15
-        ransac = K.geometry.RANSAC("homography", inl_th, max_iter, max_lo_iters, confidence)
+        del dedode
 
+
+
+    if device =="mps":
+        torch.mps.empty_cache()
+
+    print("descriptors done")
+
+    matcher = K.feature.match_smnn
+
+    if matchalgo == "loftr":
+        loftr = K.feature.LoFTR(pretrained='indoor_new')
+    else:
+        if descriptor == "disk":
+            lg = K.feature.LightGlue("disk").eval().to(device)
+        else :
+            lg = K.feature.LightGlue("dedodeb").eval().to(device) # checck if B is better,
+
+    # RANSAC params
+    inl_th = 0.5
+    max_iter = 200
+    confidence = 0.9999
+    max_lo_iters = 20
+    ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters).to(device)
+
+    with torch.no_grad():
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
                 k1 = keys[i]
                 k2 = keys[j]
-                k1keypoints, k1scores, k1descriptors = data[k1]["dedode"]
-                k2keypoints, k2scores, k2descriptors = data[k2]["dedode"]
-                k1descriptors = k1descriptors.squeeze(0)
-                k2descriptors = k2descriptors.squeeze(0)
+                k1keypoints, k1descriptors = data[k1]["points"]
+                k2keypoints, k2descriptors = data[k2]["points"]
+                if descriptor == "dedode":
+                    k1descriptors = k1descriptors.squeeze(0)
+                    k2descriptors = k2descriptors.squeeze(0)
 
                 # k1d = data[k1]["dedode"][2].squeeze(0)
                 # k2d = data[k2]["dedode"][2].squeeze(0)
@@ -277,54 +316,62 @@ def panorama(imgs: Dict[str, torch.Tensor]):
                 match_count = match[0].shape[0]
                 data[k1]["matches"] += match_count
                 data[k2]["matches"] += match_count
+
                 if match_count > 30:
-                    # inputdict = {
-                    #     "image0": K.color.rgb_to_grayscale(imgs[k1]),
-                    #     "image1": K.color.rgb_to_grayscale(imgs[k2])
-                    # }
-                    # points = loftr(inputdict)
-                    # # homo = ransac(points["keypoints0"], points["keypoints1"])
-                    # img1 = imgs[k1]
-                    # img2 = imgs[k2]
-                    # shp1 = img1.shape
-                    # shp2 = img2.shape
-                    # h = max(shp1[2], shp2[2])
-                    # w = max(shp1[3], shp2[3])
-                    #
-                    # img1p = torch.nn.functional.pad(img1,(0,w-shp1[3],0,h-shp1[2]))
-                    # img2p = torch.nn.functional.pad(img2,(0,w-shp2[3],0,h-shp2[2]))
-                    print(k1keypoints.shape, k1descriptors.shape)
-                    print(k2keypoints.shape, k2descriptors.shape)
+                    if matchalgo == "loftr":
+                        print(f"\r{k1}, {k2} LoFTR starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
+                        print()
 
-                    minval = min(k1keypoints.min(), k2keypoints.min())
-                    maxval = max(k1keypoints.max(), k2keypoints.max())
-                    k1keypoints = 2 * (k1keypoints - minval) / (maxval - minval) -1
-                    k2keypoints = 2 * (k2keypoints - minval) / (maxval - minval) -1
-                    print(torch.max(k1keypoints), torch.max(k2keypoints))
-                    print(torch.min(k1keypoints), torch.min(k2keypoints))
-                    inputdict = {
-                        "image0": {"keypoints": k1keypoints, "descriptors": k1descriptors, "image_size": torch.tensor([[imgs[k1].shape[2], imgs[k1].shape[3]]]) },
-                        "image1": {"keypoints": k2keypoints, "descriptors": k2descriptors, "image_size": torch.tensor([[imgs[k2].shape[2], imgs[k2].shape[3]]]) }
-                    }
-                    out = lg(inputdict)
-                    # print(k1, k2)
+                        inputdict = {
+                            "image0": K.color.rgb_to_grayscale(imgs[k1]),
+                            "image1": K.color.rgb_to_grayscale(imgs[k2])
+                        }
+                        points = loftr(inputdict)
+                        print(f"\r{k1}, {k2} RANSAC starting. LoFTR Matches: {points['keypoints0'].shape}{'':>20}",  end="", flush=True)
 
-                    # prints:
-                    # t2_1.png t2_2.png
-                    # t2_1.png t2_4.png
-                    # t2_2.png t2_3.png
-                    # t2_2.png t2_4.png
-                    return None, None
-                    data[k1][k2] = torch.linalg.inv(homo[0])
-                    data[k2][k1] = homo[0]
+                        homo = ransac(points["keypoints0"], points["keypoints1"])
 
-        torch.save(data, 'data/data.pth')
-        print("ransac done")
+                        # homo = ransac(points["keypoints0"].to(device), points["keypoints1"].to(device))
+                        print(f"\r{k1}, {k2} RANSAC Finished. LoFTR matches: {points['keypoints0'].shape}, RANSAC inliers: {homo[1].sum()}",  end="", flush=True)
+                        print()
 
-    if load:
-        data = torch.load('data/data.pth')
+                        data[k1][k2] = torch.linalg.inv(homo[0].cpu())
+                        data[k2][k1] = homo[0].cpu()
+                    else:
+                        print(f"\r{k1}, {k2} LightGlue starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
 
-    ref = max(data, key=lambda x: data[x]["matches"])
+                        if descriptor == "dedode":
+                            inputdict = {
+                                "image0": {"keypoints": k1keypoints.to(device), "descriptors": k1descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k1].shape[3], imgs[k1].shape[2]]], device=device) },
+                                "image1": {"keypoints": k2keypoints.to(device), "descriptors": k2descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k2].shape[3], imgs[k2].shape[2]]], device=device) },
+                            }
+                        else: # disk
+                            inputdict = {
+                                "image0": {"keypoints": k1keypoints.unsqueeze(0).to(device), "descriptors": k1descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k1].shape[3], imgs[k1].shape[2]]], device=device)},
+                                "image1": {"keypoints": k2keypoints.unsqueeze(0).to(device), "descriptors": k2descriptors.unsqueeze(0).to(device), "image_size": torch.tensor([[imgs[k2].shape[3], imgs[k2].shape[2]]], device=device)}
+                            }
+
+                        out = lg(inputdict)
+                        match = out["matches"][0].cpu()
+
+                        k1matches = k1keypoints[match[:, 0]]
+                        k2matches = k2keypoints[match[:, 1]]
+
+                        print(f"\r{k1}, {k2} LightGlue Finished. LightGlue matches: {k2matches.shape[0]}, img shape: {imgs[k1].shape}{'':>20}",  end="", flush=True)
+
+                        homo = ransac(k1matches.to(device), k2matches.to(device))
+                        homo = homo
+                        print(f"\r{k1}, {k2} RANSAC Finished. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, img shape: {imgs[k1].shape}",  end="", flush=True)
+                        print()
+                        data[k1][k2] = torch.linalg.inv(homo[0].cpu())
+                        data[k2][k1] = homo[0].cpu()
+    # torch.save(data, 'data/data.pth')
+    print("ransac done")
+
+    # if load:
+    #     data = torch.load('data/data.pth')
+
+    ref = max(data, key=lambda l: data[l]["matches"])
 
     #bfs
     Q = collections.deque()
@@ -337,16 +384,19 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         cur = Q.popleft()
         print(cur, data[cur].keys())
         for k, v in data[cur].items(): # neighbors but skip the 2 keys and visited checks
-            if k == "matches" or k == "dedode" or k in visited:
+            if k == "matches" or k == "points" or k in visited:
+                continue
+            if cur == "t2_2.png" and k == "t2_4.png":
                 continue
 
             Q.append(k)
             visited.add(k)
             qlog.append(k)
             # compute transformations of neighbor to cur
+            print(cur, k)
             homo = Hs[cur] @ data[cur][k]
             Hs[k] = homo
-    # print(qlog)
+    print(qlog)
     print("BFS done")
     x = [0]
     y = [0]
@@ -380,7 +430,8 @@ def panorama(imgs: Dict[str, torch.Tensor]):
             "mask": src_mask
         }
         out.append(src_img)
-        final = torch.where(src_mask == 1, src_img, final)
+        # src_blur_mask
+        final = torch.where(src_mask > 0.5, src_img, final)
 
         # better_show(final)
 
