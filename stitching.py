@@ -94,6 +94,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     bl, br = (0,shp[2]), (shp[3], shp[2])
     points = (tl, tr, bl, br)
     t = transform(points, homo[0])
+    
     tl_prim, tr_prim, bl_prim, br_prim = t[0],t[1],t[2],t[3]
     if variant:
         x = tl_prim[0], tr_prim[0], bl_prim[0], br_prim[0], t1_2.shape[3], 0
@@ -114,6 +115,7 @@ def stitch_background(imgs: Dict[str, torch.Tensor]):
     T = torch.tensor([[1, 0, -minx],[0, 1 ,-miny],[0, 0, 1]], dtype=torch.float32)
     H = (T @ homo[0]).unsqueeze(0)
 
+    print(H, minx, miny, maxx, maxy, width, height)
     if variant:
         src_img = K.geometry.warp_perspective(t1_1, H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
         src_mask = K.geometry.warp_perspective(torch.ones_like(t1_1), H, outs, padding_mode=p, align_corners=align_corners, mode=m) # change mode
@@ -230,43 +232,77 @@ def panorama(imgs: Dict[str, torch.Tensor]):
 
             if v.ndim == 3:
                 v = v.unsqueeze(0)
+            imgs[k] = v
             keypoints, scores, descriptors = dedode(v, apply_imagenet_normalization=True)
-            data[k]= keypoints, scores, descriptors
+            data[k] = {
+                "dedode": (keypoints, scores, descriptors),
+                "matches": 0
+            }
+        print("descriptors done")
+        matcher = K.feature.match_smnn
+        keys = list(imgs.keys())
+        matchcount = [0] * len(keys)
+        loftr = K.feature.LoFTR(pretrained='outdoor')
+        ransac = K.geometry.RANSAC()
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                k1 = keys[i]
+                k2 = keys[j]
+                k1d = data[k1]["dedode"][2].squeeze(0)
+                k2d = data[k2]["dedode"][2].squeeze(0)
+
+                match = matcher(k1d, k2d)
+
+                match_count = match[0].shape[0]
+                data[k1]["matches"] += match_count
+                data[k2]["matches"] += match_count
+                if match_count > 30:
+                    inputdict = {
+                        "image0": K.color.rgb_to_grayscale(imgs[k1]),
+                        "image1": K.color.rgb_to_grayscale(imgs[k2])
+                    }
+                    points = loftr(inputdict)
+                    homo = ransac(points["keypoints0"], points["keypoints1"])
+                    data[k1][k2] = homo[0]
+                    data[k2][k1] = homo[0]
+
         torch.save(data, 'data/data.pth')
-        print("description done")
+        print("ransac done")
 
     if load:
         data = torch.load('data/data.pth')
 
-    count = len(data)
+    ref = max(data, key=lambda x: data[x]["matches"])
+    #bfs
+    Q = collections.deque()
+    visited = set()
 
-    # matches = collections.defaultdict(list)
-    matches = []
-    matcher = K.feature.match_smnn
-    keys = list(imgs.keys())
-    matchcount = [0] * len(keys)
-    for i in range(len(keys)):
-        # print(k)
-        for j in range(i + 1, len(keys)):
-            k1 = keys[i]
-            k2 = keys[j]
+    visited.add(ref)
+    Q.append(ref)
+    homos = {ref: torch.eye(3)}
+    while Q:
+        cur = Q.popleft()
+        for k, v in data[cur].items(): # neighbors but skip the 2 keys and visited checks
+            if k == "matches" or k == "dedode" or k in visited:
+                continue
 
-            match = matcher(data[k1][2].squeeze(0), data[k2][2].squeeze(0))
+            Q.append(k)
+            visited.add(k)
 
-            match_count = match[0].shape[0]
-            matchcount[i] += match_count
-            matchcount[j] += match_count
-            print(k1, k2, match[0].shape)
-            if match_count > 30:
+            # compute transformations of neighbor to cur
+            homo = homos[cur] @ data[cur][k]
+            homos[k] = homo
 
-                d = {
-                    "image0": {"keypoints": data[k1][0], "descriptors": data[k1][2], "image": imgs[k1]},
-                    "image1": {"keypoints": data[k2][0], "descriptors": data[k2][2], "image": imgs[k2]},
-                }
-                matches.append((k1, k2, d))
 
-    ref = max(matchcount)
-    refkey = keys[matchcount.index(ref)]
-    print(refkey, ref)
+
+
+    #
+    # shp = imgs[ref].shape
+    # print(shp)
+    # tl, tr = (0, 0), (shp[3], 0)
+    # bl, br = (0, shp[2]), (shp[3], shp[2])
+    # points = (tl, tr, bl, br)
+    # t = transform(points, homo[0])
+    # tl_prim, tr_prim, bl_prim, br_prim = t[0], t[1], t[2], t[3]
 
     return img, overlap
