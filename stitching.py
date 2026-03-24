@@ -219,7 +219,7 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         overlap: torch.Tensor of the output image.
     """
     img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
-    overlap = torch.empty((3, 256, 256), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
+    overlap = torch.empty((len(imgs.keys()), len(imgs.keys())), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
     if torch.backends.mps.is_available():
@@ -275,7 +275,7 @@ def panorama(imgs: Dict[str, torch.Tensor]):
 
 
 
-    if device =="mps":
+    if device == torch.device("mps"):
         torch.mps.empty_cache()
 
     print("descriptors done")
@@ -291,15 +291,16 @@ def panorama(imgs: Dict[str, torch.Tensor]):
             lg = K.feature.LightGlue("dedodeb").eval().to(device) # checck if B is better,
 
     # RANSAC params
-    inl_th = 0.5
+    inl_th = 1
     max_iter = 200
     confidence = 0.9999
     max_lo_iters = 20
-    ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters).to(device)
+    ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)#.to(device)
 
     with torch.no_grad():
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
+
                 k1 = keys[i]
                 k2 = keys[j]
                 k1keypoints, k1descriptors = data[k1]["points"]
@@ -318,6 +319,9 @@ def panorama(imgs: Dict[str, torch.Tensor]):
                 data[k2]["matches"] += match_count
 
                 if match_count > 30:
+                    print(i, j, overlap.shape)
+                    overlap[i, j] = 1
+                    overlap[j, i] = 1
                     if matchalgo == "loftr":
                         print(f"\r{k1}, {k2} LoFTR starting. Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
                         print()
@@ -359,8 +363,9 @@ def panorama(imgs: Dict[str, torch.Tensor]):
 
                         print(f"\r{k1}, {k2} LightGlue Finished. LightGlue matches: {k2matches.shape[0]}, img shape: {imgs[k1].shape}{'':>20}",  end="", flush=True)
 
-                        homo = ransac(k1matches.to(device), k2matches.to(device))
-                        homo = homo
+                        homo = ransac(k1matches, k2matches)
+
+                        # homo = ransac(k1matches.to(device), k2matches.to(device))
                         print(f"\r{k1}, {k2} RANSAC Finished. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, img shape: {imgs[k1].shape}",  end="", flush=True)
                         print()
                         data[k1][k2] = torch.linalg.inv(homo[0].cpu())
@@ -385,8 +390,6 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         print(cur, data[cur].keys())
         for k, v in data[cur].items(): # neighbors but skip the 2 keys and visited checks
             if k == "matches" or k == "points" or k in visited:
-                continue
-            if cur == "t2_2.png" and k == "t2_4.png":
                 continue
 
             Q.append(k)
@@ -420,21 +423,27 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     # homo needs transform
     T = torch.tensor([[1, 0, -x_min],[0, 1 ,-y_min],[0, 0, 1]], dtype=torch.float32)
     out = []
+    finalm = None
     for k in keys:
         H = Hs[k]
         H = (T @ H).unsqueeze(0)
         src_img = K.geometry.warp_perspective(imgs[k], H, outs)
         src_mask = K.geometry.warp_perspective(torch.ones_like(imgs[k]), H, outs)
-        data[k] = {
-            "warped": src_img,
-            "mask": src_mask
-        }
+        # data[k] = {
+        #     "warped": src_img,
+        #     "mask": src_mask
+        # }
         out.append(src_img)
+
         # src_blur_mask
         final = torch.where(src_mask > 0.5, src_img, final)
+        if finalm is None:
+            finalm = src_mask
+        else:
+            finalm = finalm + src_mask
 
-        # better_show(final)
-
+        # better_show(src_mask)
+    # better_show(finalm)
     img = ready(final)
 
     # H = (T @ homo[0]).unsqueeze(0)
