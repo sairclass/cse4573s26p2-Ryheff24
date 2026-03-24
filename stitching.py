@@ -225,18 +225,26 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     save = True
     load = True
     data = {}
+    max_h = 0
+    max_w = 0
     for k, v in imgs.items():
+
         v = v / 255
         if v.ndim == 3:
             v = v.unsqueeze(0)
         imgs[k] = v
+        max_h = max(max_h, v.shape[2])
+        max_w = max(max_w, v.shape[3])
     keys = list(imgs.keys())
-
+    for k, v in imgs.items():
+        imgs[k] = torch.nn.functional.pad(v, (0,  max_w - imgs[k].shape[3], 0, max_h - imgs[k].shape[2]))
+        # print(imgs[k].shape)
     if save or not load:
         dedode = K.feature.DeDoDe.from_pretrained(detector_weights="L-C4-v2", descriptor_weights="B-upright")
-        lg = K.feature.LightGlue("disk").eval()
+        lg = K.feature.LightGlue("dedodeb").eval()
 
         for k, v in imgs.items():
+
             keypoints, scores, descriptors = dedode(v, apply_imagenet_normalization=True)
             data[k] = {
                 "dedode": (keypoints, scores, descriptors),
@@ -251,32 +259,62 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         confidence = 0.999
         max_lo_iters = 15
         ransac = K.geometry.RANSAC("homography", inl_th, max_iter, max_lo_iters, confidence)
+
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
                 k1 = keys[i]
                 k2 = keys[j]
-                k1d = data[k1]["dedode"][2].squeeze(0)
-                k2d = data[k2]["dedode"][2].squeeze(0)
+                k1keypoints, k1scores, k1descriptors = data[k1]["dedode"]
+                k2keypoints, k2scores, k2descriptors = data[k2]["dedode"]
+                k1descriptors = k1descriptors.squeeze(0)
+                k2descriptors = k2descriptors.squeeze(0)
 
-                match = matcher(k1d, k2d)
+                # k1d = data[k1]["dedode"][2].squeeze(0)
+                # k2d = data[k2]["dedode"][2].squeeze(0)
+
+                match = matcher(k1descriptors, k2descriptors)
 
                 match_count = match[0].shape[0]
                 data[k1]["matches"] += match_count
                 data[k2]["matches"] += match_count
                 if match_count > 30:
-                    inputdict = {
-                        "image0": K.color.rgb_to_grayscale(imgs[k1]),
-                        "image1": K.color.rgb_to_grayscale(imgs[k2])
-                    }
-                    points = loftr(inputdict)
-                    homo = ransac(points["keypoints0"], points["keypoints1"])
+                    # inputdict = {
+                    #     "image0": K.color.rgb_to_grayscale(imgs[k1]),
+                    #     "image1": K.color.rgb_to_grayscale(imgs[k2])
+                    # }
+                    # points = loftr(inputdict)
+                    # # homo = ransac(points["keypoints0"], points["keypoints1"])
+                    # img1 = imgs[k1]
+                    # img2 = imgs[k2]
+                    # shp1 = img1.shape
+                    # shp2 = img2.shape
+                    # h = max(shp1[2], shp2[2])
+                    # w = max(shp1[3], shp2[3])
+                    #
+                    # img1p = torch.nn.functional.pad(img1,(0,w-shp1[3],0,h-shp1[2]))
+                    # img2p = torch.nn.functional.pad(img2,(0,w-shp2[3],0,h-shp2[2]))
+                    print(k1keypoints.shape, k1descriptors.shape)
+                    print(k2keypoints.shape, k2descriptors.shape)
 
+                    minval = min(k1keypoints.min(), k2keypoints.min())
+                    maxval = max(k1keypoints.max(), k2keypoints.max())
+                    k1keypoints = 2 * (k1keypoints - minval) / (maxval - minval) -1
+                    k2keypoints = 2 * (k2keypoints - minval) / (maxval - minval) -1
+                    print(torch.max(k1keypoints), torch.max(k2keypoints))
+                    print(torch.min(k1keypoints), torch.min(k2keypoints))
+                    inputdict = {
+                        "image0": {"keypoints": k1keypoints, "descriptors": k1descriptors, "image_size": torch.tensor([[imgs[k1].shape[2], imgs[k1].shape[3]]]) },
+                        "image1": {"keypoints": k2keypoints, "descriptors": k2descriptors, "image_size": torch.tensor([[imgs[k2].shape[2], imgs[k2].shape[3]]]) }
+                    }
+                    out = lg(inputdict)
                     # print(k1, k2)
+
                     # prints:
                     # t2_1.png t2_2.png
                     # t2_1.png t2_4.png
                     # t2_2.png t2_3.png
                     # t2_2.png t2_4.png
+                    return None, None
                     data[k1][k2] = torch.linalg.inv(homo[0])
                     data[k2][k1] = homo[0]
 
@@ -343,6 +381,7 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         }
         out.append(src_img)
         final = torch.where(src_mask == 1, src_img, final)
+
         # better_show(final)
 
     img = ready(final)
