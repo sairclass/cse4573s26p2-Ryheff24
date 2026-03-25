@@ -4,3 +4,4 @@ __pycache__
 multi_img_output.py
 .idea
 data
+backups/
