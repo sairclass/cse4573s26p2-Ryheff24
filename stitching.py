@@ -214,9 +214,10 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         overlap: torch.Tensor of the output image.
     """
     img = torch.zeros((3, 256, 256), dtype=torch.uint8) # assumed 256*256 resolution. Update this as per your logic.
-    overlap = torch.empty((len(imgs.keys()), len(imgs.keys())), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
+    overlap = torch.eye(len(imgs.keys()), dtype=torch.uint8) # assumed empty 256*256 overlap. Update this as per your logic.
 
     #TODO: Add your code here. Do not modify the return and input arguments.
+    torch.manual_seed(42)
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
@@ -267,7 +268,7 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         lg = K.feature.LightGlue("disk").eval().to(device)
 
     ransac = K.geometry.RANSAC("homography", inl_th=inl_th, max_iter=max_iter, confidence=confidence, max_lo_iters=max_lo_iters)#.to(device)
-    print("descriptors done")
+    # print("descriptors done")
 
     with torch.no_grad():
         for i in range(len(keys)):
@@ -328,50 +329,28 @@ def panorama(imgs: Dict[str, torch.Tensor]):
 
                         # homo = ransac(k1matches.to(device), k2matches.to(device))
 
-                        if homo[1].sum().cpu() > 50:
-                            print(f"\r{k1}, {k2} RANSAC Finished. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
-                            print()
+                        if homo[1].sum().cpu() > 100:
+                            # print(f"\r{k1}, {k2} RANSAC Finished. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, Prelim matches: {match_count}, img shape: {imgs[k1].shape}", end="", flush=True)
+                            # print()
                             data[k1][k2] = torch.linalg.inv(homo[0].cpu())
                             data[k2][k1] = homo[0].cpu()
                             edges.append((k1, k2, homo[1].sum().cpu()))
-                        else:
-                            print(f"{k1}, {k2} rejected. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, Prelim matches: {match_count}, img shape: {imgs[k1].shape}")
+                        # else:
+                            # print(f"{k1}, {k2} rejected. LightGlue matches: {k2matches.shape[0]}, RANSAC inliers: {homo[1].sum()}, Prelim matches: {match_count}, img shape: {imgs[k1].shape}")
                         if device == torch.device("mps"):
                             torch.mps.empty_cache()
 
     del matcher
+    del ransac
     if matchalgo == "loftr":
         del loftr
     else:
         del lg
     if device == torch.device("mps"):
         torch.mps.empty_cache()
-    print("Ransac Done")
+    # print("Ransac Done")
 
-
-    mst = False
     ref = max(data, key=lambda l: data[l]["matches"])
-
-    Hsm = {ref: torch.eye(3)}
-
-    edges = sorted(edges, key=lambda f: f[2])
-    #
-    # v = set()
-    # v.add(ref)
-    # while len(keys) > len(v):
-    #     for e in edges:
-    #         k1, k2, _ = e
-    #         if k1 in v and k2 not in v:
-    #             # add it
-    #             Hsm[k2] = Hsm[k1] @ data[k1][k2]
-    #             v.add(k2)
-    #             edges.remove(e)
-    #             break
-    #         if k2 in v and k1 not in v:
-    #             Hsm[k1] = Hsm[k2] @ data[k2][k1]
-    #             v.add(k1)
-    #             edges.remove(e)
-    #             break
 
     Hsb = {ref: torch.eye(3)}
     Q = []
@@ -387,22 +366,14 @@ def panorama(imgs: Dict[str, torch.Tensor]):
             Q.append(k)
             visited.add(k)
             # compute transformations of neighbor to cur
-
             homo = Hsb[cur] @ data[cur][k]
             Hsb[k] = homo
-    # if mst:
-    #     Hs = Hsm
-    # else:
+
     Hs = Hsb
-
-    # for i in keys:
-    #     if not torch.equal(Hsm[i], Hsb[i]):
-    #         print(f"{i} FAILED: {Hsm[i]} != {Hsb[i]} ")
-
 
     x = [0]
     y = [0]
-    print("bfs done")
+    # print("bfs done")
 
     for k, v in imgs.items():
         shp = v.shape
@@ -427,16 +398,25 @@ def panorama(imgs: Dict[str, torch.Tensor]):
     finalm = torch.zeros(outs)
     acc = torch.zeros(outs)
     dervs = []
+    if "IMG_3815.png" in keys:
+        skip = True
+    else:
+        skip = False
+    # print("warping")
+    # print(keys)
     for k in keys:
         H = Hs[k]
         H = (T @ H).unsqueeze(0)
+
         src_img = K.geometry.warp_perspective(imgs[k], H, outs)
+
         src_mask = K.geometry.warp_perspective(torch.ones_like(imgs[k]), H, outs)
         delimg = K.filters.spatial_gradient(src_img)
         dervs.append(delimg)
         src_mask = (src_mask > 0.99)
         out_imgs.append(src_img)
         out_masks.append(src_mask)
+        if skip: continue
         if acc is None:
             acc = src_mask
             overlaps = src_mask
@@ -459,8 +439,6 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         mask = torch.where(overlaps, target_region, src_mask)
 
         final = mask * src_img + (1 - mask) * final
-        # print(f"total time: {blendtime - start}, warptime: {warptime- start}, erodetime: {erodetime- warptime}, blurtime: {blurtime-erodetime} blendtime: {blendtime-blurtime}")
-
 
     nowimg = out_imgs[0]
     nowmask = out_masks[0]
@@ -472,8 +450,6 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         minh, minw = zeros.min(dim=0).values
         maxh, maxw = zeros.max(dim=0).values
         return curmask[:, :, minh:maxh+1, minw:maxw+1], a[:, :, minh:maxh+1, minw:maxw+1], b[:, :, minh:maxh+1, minw:maxw+1],(minw, minh, maxw, maxh)
-
-
 
     def minerrcut(m, b_1, b_2):
         # https://people.eecs.berkeley.edu/~efros/research/quilting/quilting.pdf
@@ -500,16 +476,20 @@ def panorama(imgs: Dict[str, torch.Tensor]):
             E[i] = e[i] + best
             path[i] = bestidx - 1
 
-
         curidx = E[-1].argmin().item()
         ret = torch.zeros_like(m)
         for w in range(N1-1, -1, -1):
             ret[w, :curidx] = 1
             if w > 0:
-                curidx = curidx + int(path[w, curidx])
-
-
+                # curidx = curidx + int(path[w, curidx])
+                curidx  = min(max(curidx + int(path[w, curidx]), 0), E.shape[1]-1)
+        # ret = ret.unsqueeze(0).unsqueeze(0).float()
+        # ks=61
+        # ret = 1-torch.nn.functional.max_pool2d(1-ret.to(torch.float32).to(device), kernel_size=ks*2, stride=1, padding=ks*2//2).cpu()
+        # ret = K.filters.gaussian_blur2d(ret, (ks,ks), (10,10))
+        # ret = ret.squeeze()
         return ret
+    # print("stiching")
 
     for i in range (1, len(out_imgs)):
         if i == 0: continue
@@ -524,19 +504,18 @@ def panorama(imgs: Dict[str, torch.Tensor]):
         a, cur_ov_crop, now_ov_crop, loc = findbb(overlaps, cur_img, nowimg)
         minw, minh, maxw, maxh = loc
         cut = minerrcut(a,cur_ov_crop,now_ov_crop)
-        cut_mask = torch.nn.functional.pad(cut, (minw, cur_img.shape[3]-maxw-1, minh, cur_img.shape[2]-maxh-1)).bool()
+        cut_mask = torch.zeros_like(cur_img[0,0])
+        cut_mask[minh:minh+cut.shape[0], minw:minw+cut.shape[1]] = cut
+
+        # cut_mask = torch.nn.functional.pad(cut, (minw, cur_img.shape[3]-maxw-1, minh, cur_img.shape[2]-maxh-1)).bool()
         newmask = torch.clamp(nowmask + cur_mask, 0,1).bool()
         nowimg = torch.where(cur_mask & ~overlaps, cur_img, nowimg)
-        nowimg = torch.where(overlaps & cut_mask, cur_img, nowimg)
+        sigma = 10
+        ks= 6 * sigma + 1
+        b = (overlaps[:,:1].float() * cut_mask)
+        b = -torch.nn.functional.max_pool2d(-b.to(torch.float32).to(device), kernel_size=ks, stride=1, padding=ks//2).cpu()
+        a = K.filters.gaussian_blur2d(b, (ks,ks), (sigma, sigma)).squeeze()
+        nowimg = a * cur_img + (1-a) * nowimg
         nowmask = newmask
-
-
-
-        # break
-
-
-    img = ready(final)
-
-
-
+    img = ready(nowimg if skip else final)
     return img, overlap
